@@ -1,0 +1,73 @@
+/* ==================================================================
+Date de mise à jour : 2022-07-28
+===================================================================== */
+// ================================ Configuration des extension Gradle
+plugins {
+    id 'java'
+    id 'eclipse'
+    id 'idea'
+    id 'distribution'
+    id 'application'
+    //id 'antlr'
+}
+// ================================ Configuration du produit
+version '0.1.0'
+group 'ca.griis.gen'
+compileJava.options.encoding = 'UTF-8'
+// ================================ Configuration de la structure du projet
+// À venir
+// ================================ Liste des dépendances
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+//FIXME (2023-08-17) : error when mssql part is there
+// Archive is not a ZIP archive : Cannot expand ZIP /mssql-jdbc_auth-12.2.0.x86.dll
+
+//    // https://mvnrepository.com/artifact/com.microsoft.sqlserver/mssql-jdbc
+//    implementation 'com.microsoft.sqlserver:mssql-jdbc:12.4.0.jre11'
+//    // https://mvnrepository.com/artifact/com.microsoft.sqlserver/mssql-jdbc_auth
+//    implementation 'com.microsoft.sqlserver:mssql-jdbc_auth:12.2.0.x86'
+//    // https://mvnrepository.com/artifact/us.fatehi/schemacrawler-sqlserver
+//    implementation 'us.fatehi:schemacrawler-sqlserver:16.20.4'
+
+    // https://mvnrepository.com/artifact/org.jgrapht/jgrapht-core
+    implementation group: 'org.jgrapht', name: 'jgrapht-core', version: '1.5.1'
+    // https://mvnrepository.com/artifact/org.antlr/ST4
+    implementation group: 'org.antlr', name: 'ST4', version: '4.3.3'
+    // https://mvnrepository.com/artifact/org.yaml/snakeyaml
+    implementation group: 'org.yaml', name: 'snakeyaml', version: '1.32'
+
+    // https://mvnrepository.com/artifact/us.fatehi/schemacrawler
+    implementation 'us.fatehi:schemacrawler:16.20.4'
+    // https://mvnrepository.com/artifact/org.postgresql/postgresql
+    implementation group: 'org.postgresql', name: 'postgresql', version: '42.4.3'
+    // https://mvnrepository.com/artifact/us.fatehi/schemacrawler-postgresql
+    implementation 'us.fatehi:schemacrawler-postgresql:16.20.4'
+
+    // JUnit
+    testImplementation 'org.junit.jupiter:junit-jupiter-api:5.9.0' //5.9.0
+    testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.9.0'
+}
+
+// ================================ Configuration des tests
+test {
+    useJUnitPlatform()
+}
+
+// ================================ Configuration générateur de executable
+jar {
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    manifest {
+        attributes 'Main-Class': 'ca.griis.gen.SqlGen'
+    }
+
+    from {
+        configurations.runtimeClasspath.collect {it.isDirectory()  ? it : zipTree(it) }
+    }
+}
+
+application {
+    mainClass = "ca.griis.gen.SqlGen"
+}

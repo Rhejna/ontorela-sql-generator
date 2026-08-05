@@ -1,0 +1,21 @@
+# === Database connection parameters
+srcServer:
+  - rdbms: mssql
+    host: localhost
+    port: 1433
+    databaseId: master
+    schemaId: supply
+    user: sa
+    pass: ChangeMe123!
+
+
+# === Historicization parameters
+schemaTemporalCategory: V  #B, T
+author: RL
+outDirPath: test-result
+version: 1.0
+temporalIntervalType: INT4RANGE    #TSRANGE
+temporalPointType: INT             #Timestamp
+includeVXX: false
+granularity: MINUTE                #MINUTE
+executeScript: false

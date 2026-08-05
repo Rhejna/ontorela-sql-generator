@@ -1,0 +1,22 @@
+# === Database connection parameters
+# TODO 2023-08-24 rl : add list of schemas
+srcServer:
+  - rdbms: postgresql
+    host: localhost
+    port: 5432
+    databaseId: postgres
+    schemaId: rh
+    user: postgres
+    pass: postgres
+
+# === Historicization parameters
+schemaTemporalCategory: V  #B, T
+author: RL
+outDirPath: test-result
+version: 1.0
+temporalIntervalType: INT4RANGE
+temporalPointType: INT
+includeVXX: false
+granularity:
+executeScript: false
+emiraScripts: true

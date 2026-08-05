@@ -1,0 +1,40 @@
+import "SSQL.stg"
+/*************************************************************
+Gabarit de génération de code SQL pour MSSQL 13.0+
+Notes :
+  * Tous les identificateurs doivent avoir un delimiteur.
+**************************************************************/
+
+/******************************************************************************
+Fonctions EMIRA de chaque table d'une bd.
+*******************************************************************************/
+evaluate_function_attr(tableId, schemaId, nomatt, attSet) ::=
+<<
+-- fonction evaluer pour : <tableId>
+create function <schemaId:delimiteur()>.<tableId>_eva_<nomatt.id>
+  (
+  <attSet:{a|@<a.id> <if(a.isBuiltIn)><a.type><else><schemaId:delimiteur()>.<a.type:delimiteur()><endif>}; separator=", ">
+  )
+RETURNS TABLE
+AS
+RETURN
+(
+    select *
+    from <schemaId:delimiteur()>.[<tableId>]
+    where <attSet:{a|[<a.id>] = @<a.id>}; separator=" and ">
+);
+<\n>
+>>
+
+
+
+/**************************************************************
+ Divers gabarit réutilisable
+***************************************************************/
+
+
+domainTerm()::=<% type %>
+beforeTypeTerm()::=<% from %>
+charComment()::=<% -- %>
+orReplace()::=<%or alter %>
+langageType()::=<%%>

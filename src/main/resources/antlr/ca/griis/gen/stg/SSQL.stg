@@ -1,0 +1,348 @@
+/*************************************************************
+Gabarit de génération de code SQL commun au sgbd
+**************************************************************/
+scriptHeader(rdbms, schemaId, creationDate, responsable, version, objet)::=
+<<
+/*
+-- =========================================================================== A
+Schema : <schemaId>
+Creation Date : <creationDate>
+Encoding : UTF-8, sans BOM, fin de ligne Unix (LF)
+Plateforme : <rdbms>
+Responsable : <responsable>
+Version : <version>
+Status : dev
+Objet :
+  <objet>
+-- =========================================================================== A
+*/
+<\n>
+>>
+
+/*************************************************************
+Gabarits gestion d'un schema
+**************************************************************/
+schema_cre(schema_id) ::=
+<<
+create schema <notExists()><schema_id:delimiteur()>;
+<\n>
+>>
+
+schema_comment_cre(schemaId, value) ::=
+<<
+<charComment()>comment on schema <schemaId:delimiteur()> is '<value>';
+<\n>
+>>
+
+schema_drp(schemaId, isCascade) ::=
+<<
+drop schema <schemaId:delimiteur()> <if(isCascade)>cascade<endif>;
+<\n>
+>>
+
+/*************************************************************
+Définition d'un domaine (Type Prédéfini) (Domain SQL et PostgreSQL).
+Pour définir les types qui peuvent être représentés par les domaines de base.
+**************************************************************/
+domain_cre(schema_id, domaine_id, type, isNotNull) ::=
+<<
+-- Domain <domaine_id>
+create <domainTerm()><schema_id:delimiteur()><if(schema_id)>.<endif><domaine_id:delimiteur()>
+  <beforeTypeTerm()><if(type.isBuiltIn)><type.id><else><schema_id:delimiteur()>.<type.id:delimiteur()><endif> <if(isNotNull)>not null<endif>;
+<\n>
+>>
+
+domain_comment_cre(schema_id, domaine_id, value) ::=
+<<
+<charComment()>comment on domain <schema_id:delimiteur()>.<domaine_id:delimiteur()> is '<value>';
+<\n>
+>>
+
+domain_drp(schema_id, domaine_id, isCascade)::=
+<<
+drop <domainTerm()> <schema_id:delimiteur()><if(schema_id)>.<endif><domaine_id:delimiteur()> <if(isCascade)>cascade<endif>;
+<\n>
+>>
+
+/*************************************************************
+Gabarits gestion d'une table
+**************************************************************/
+
+table_cre(schemaId, tableId, attSet, pkId, keySet) ::=
+<<
+-- Table <tableId>
+create table <schemaId:delimiteur()><if(schemaId)>.<endif><tableId:delimiteur()>
+(
+  <attSet:{a|<a.id:delimiteur()> <if(a.isBuiltIn)><a.type><else><schemaId:delimiteur()>.<a.type:delimiteur()><endif> not null}; separator=", \n">,
+  <pk_constraint_cre(pkId, keySet)>
+);
+<\n>
+>>
+
+table_comment_cre(schemaId, tableId, value) ::=
+<<
+<charComment()>comment on table <schemaId:delimiteur()><if(schemaId)>.<endif><tableId:delimiteur()> is '<value>';
+<\n>
+>>
+
+attribut_comment_cre(schemaId, tableId, attId, value) ::=
+<<
+<charComment()>comment on column <schemaId:delimiteur()><if(schemaId)>.<endif><tableId:delimiteur()>.<attId:delimiteur()> is '<value>';
+<\n>
+>>
+
+table_drp(schemaId, tableId, isCascade) ::=
+<<
+drop table <schemaId:delimiteur()><if(schemaId)>.<endif><tableId:delimiteur()> <if(isCascade)>cascade<endif>;
+<\n>
+>>
+
+
+/*************************************************************
+Gabarits gestion d'une vue
+**************************************************************/
+view_naming_cre(viewSchemaId, viewId, tableSchemaId, tableId, attSet) ::=
+<<
+-- Naming view for <tableId>
+create view <viewSchemaId:delimiteur()><if(viewSchemaId)>.<endif><viewId:delimiteur()> as
+  select <if(attSet)><attSet:{a|<a.id:delimiteur()> as <a.alias:delimiteur()>}; separator=",  \n    "><else>*<endif>
+  from <tableSchemaId:delimiteur()><if(tableSchemaId)>.<endif><tableId:delimiteur()>;
+<\n>
+>>
+
+view_comment_cre(schema_id, view_id, value) ::=
+<<
+<charComment()>comment on view <schema_id:delimiteur()><if(schema_id)>.<endif><view_id:delimiteur()> is '<value>';
+<\n>
+>>
+
+view_drp(schema_id, view_id, is_cascade) ::=
+<<
+drop view <schema_id:delimiteur()><if(schema_id)>.<endif><view_id:delimiteur()> <if(is_cascade)>cascade<endif>;
+<\n>
+>>
+
+/*************************************************************
+Création d'une contrainte
+**************************************************************/
+pk_constraint_cre(pkId, keySet) ::=
+<<
+constraint <pkId> primary key (<keySet:{a|<a.id:delimiteur()>}; separator=", ">)
+>>
+
+uk_constraint_cre(schemaId, constraintId, tableId, keySet) ::=
+<<
+-- Unique key for <tableId>
+alter table <schemaId:delimiteur()><if(schemaId)>.<endif><tableId:delimiteur()>
+  add constraint <constraintId> unique (<keySet:{a|<a.id:delimiteur()>}; separator=", ">);
+<\n>
+>>
+
+fk_constraint_cre(constraintId, srcTableSchemaId, srcTableId, srcTableAttSet,
+                                dstTableSchemaId, dstTableId, dstTableAttSet) ::=
+<<
+-- Foreign key : <srcTableId> -> <dstTableId>
+alter table <srcTableSchemaId:delimiteur()><if(srcTableSchemaId)>.<endif><srcTableId:delimiteur()>
+  add constraint <constraintId> foreign key (<srcTableAttSet:{a|<a.id:delimiteur()>}; separator=", ">)
+    references <dstTableSchemaId:delimiteur()><if(dstTableSchemaId)>.<endif><dstTableId:delimiteur()> (<dstTableAttSet:{a|<a.id:delimiteur()>}; separator=", ">);
+<\n>
+>>
+
+constraint_comment_cre(schemaId, constraintId, tableId, value) ::=
+<<
+<charComment()>comment on constraint <constraintId> on <schemaId:delimiteur()><if(schemaId)>.<endif><tableId:delimiteur()> is '<value>';
+<\n>
+>>
+
+index_comment_cre(schemaId, constraintId, value) ::=
+<<
+comment on index <schemaId:delimiteur()><if(schemaId)>.<endif><constraintId:delimiteur()> is '<value>';
+<\n>
+>>
+
+constraint_drp(schemaId, tableId, constraintId) ::=
+<<
+alter table <schemaId:delimiteur()><if(schemaId)>.<endif><tableId:delimiteur()>
+  drop constraint <constraintId>;
+<\n>
+>>
+
+/*************************************************************
+Création de fonction de verification participation Min
+**************************************************************/
+minParticipationCheck_func(schemaId, constraintId, tableId, domainKey, min) ::=
+<<
+-- Minimum participation check on : <tableId>
+create or replace function <schemaId:delimiteur()>.<constraintId>min(_<domainKey.id> <schemaId:delimiteur()>.<domainKey.type:delimiteur()>)
+  returns Boolean
+  immutable strict
+  language 'plpgsql' as
+$$
+begin
+  if
+  (
+    (
+      select count(*)
+      from <schemaId:delimiteur()>.<tableId:delimiteur()>
+      where <domainKey.id:delimiteur()> = _<domainKey.id>
+    ) >= <min>
+  )
+  then
+    return true;
+  else
+    raise notice 'Participation  %  does not respect minimum value %', '<tableId>', <min>;
+    return false;
+  end if;
+end;
+$$;
+<\n>
+>>
+
+
+/*************************************************************
+Création de fonction de verification participation Max
+**************************************************************/
+maxParticipationCheck_func(schemaId, constraintId, tableId, domainKey, max) ::=
+<<
+-- Maximum participation check on : <tableId>
+create or replace function <schemaId:delimiteur()>.<constraintId>max(_<domainKey.id> <schemaId:delimiteur()>.<domainKey.type:delimiteur()>)
+  returns Boolean
+  immutable strict
+  language 'plpgsql' as
+$$
+begin
+  if
+  (
+    (
+      select count(*)
+      from <schemaId:delimiteur()>.<tableId:delimiteur()>
+      where <domainKey.id:delimiteur()> = _<domainKey.id>
+    ) \<= <max>
+  )
+  then
+    return true;
+  else
+    raise notice 'Participation  %  does not respect maximal value %', '<tableId>', <max>;
+    return false;
+  end if;
+end;
+$$;
+<\n>
+>>
+
+
+/*************************************************************
+Création de fonction de verification des axiomes normalisés
+**************************************************************/
+unionAxiomCheck_func(contrainte_id, schemaId, unionTable_id, unionTable_keySet, elementSet) ::=
+<<
+-- Union axiom ckeck on : <unionTable_id>
+create or replace function <schemaId:delimiteur()>.<contrainte_id>()
+  returns Boolean
+  immutable strict
+  language 'plpgsql' as
+$$
+declare
+  union_string Text;
+begin
+  if not exists
+  (
+    with t as
+      (
+        select <unionTable_keySet:{a|<a.id:delimiteur()>}; separator=", ">
+        from <schemaId:delimiteur()>.<unionTable_id:delimiteur()>
+        except
+        <elementSet:{e|<e.exp>}; separator="\nunion \n">
+      )
+    select count(*) from t
+  )
+  then
+    return true;
+  else
+    raise notice ' Union inclusion not respected for %', '<unionTable_id>';
+    return false;
+  end if;
+end;
+$$;
+<\n>
+>>
+
+/*************************************************************
+Création de fonction de verification d'appartenance d'un tuple à une classe
+**************************************************************/
+membershipCheck_func(contrainte_id, schemaId, sourceTable_id, sourceAtt, targetTableMap) ::=
+<<
+-- Membership ckeck on : <sourceTable_id>
+create or replace function <schemaId:delimiteur()>.<contrainte_id>()
+  returns <schemaId:delimiteur()>.<sourceTable_id:delimiteur()>
+  immutable strict
+  language sql as
+$$
+select *
+from <schemaId:delimiteur()>.<sourceTable_id:delimiteur()>
+where <targetTableMap:{a| not exists (select <a.targetAtt:delimiteur()>
+                                      from <schemaId:delimiteur()>.<a.table_id:delimiteur()>
+                                      where <sourceAtt:delimiteur()> = <a.targetAtt:delimiteur()>)}; separator="\n  and ">);
+$$;
+<\n>
+>>
+
+/**************************************************************
+Manipulation d'un schéma
+***************************************************************/
+insert(schemaId, tableId, attDefSet, attValueSet) ::=
+<<
+insert into <schemaId:delimiteur()><if(schemaId)>.<endif><tableId:delimiteur()> (<attDefSet(attDefSet)>)
+  values (<attValueSet:{v|<a.valeur>}; separator=", \n">);
+<\n>
+>>
+
+delete(schemaId, tableId)::=
+<<
+delete from <schemaId:delimiteur()><if(schemaId)>.<endif><tableId:delimiteur()>;
+<\n>
+>>
+
+
+/*************************************************************
+Création de requête
+**************************************************************/
+query(distinct, projection, selection, condition)::=
+<<
+select <if(distinct)>distinct<endif><projection:{a|<a.exp>}; separator=", ">
+from <selection:{a|<a.exp>}; separator=", ">;
+<\n>
+>>
+
+
+/**************************************************************
+ Divers gabarit réutilisable
+***************************************************************/
+bijointure(varGauche, varDroite, attJointure) ::=
+<% <relvars:{v|<v.schemaId:delimiteur()><if(v.schemaId)>.<endif><v.var_id:delimiteur()>};
+   separator=" JOIN ">
+%>
+
+selectKeys(schemaId, table_id, keySet) ::=
+<%
+  select <keySet:{a|<a.id:delimiteur()>}; separator=", "> <\n>
+  from <schemaId:delimiteur()>.<table_id:delimiteur()>
+%>
+
+attDefSet(att)::= <% (<att:{a|<a.id:delimiteur()>}; separator=", ">) %>
+
+paramAtt(att)::= <% (<att:{a|<a.entier>}; separator=", ">) %>
+
+delimiteur(id) ::= <% "<id>"%>
+
+
+/**************************************************
+gabarit définit dans les fichier spécifique de sgbd
+***************************************************/
+notExists()::=<%%>
+domainTerm()::=<%%>
+beforeTypeTerm()::=<%%>
+charComment()::=<%%>
+langageType()::=<%%>
+
+

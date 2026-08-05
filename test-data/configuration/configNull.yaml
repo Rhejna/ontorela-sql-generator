@@ -1,0 +1,20 @@
+# Database connection parameters
+srcServer:
+  - rdbms: postgresql
+    host: localhost
+    port: 5432
+    databaseId: UHFgen
+    schemaId: supply
+    user: uhf
+    pass: uhf
+
+# Historicization parameters
+schemaTemporalCategory:
+author: RL
+outDirPath: test-result
+version: 1.0
+temporalIntervalType: INT4RANGE    #TSRANGE
+temporalPointType: INT             #Timestamp
+includeVXX: false
+granularity:                       #MINUTE
+executeScript: false

@@ -1,0 +1,19 @@
+# === Database connection parameters
+srcServer:
+  - rdbms: postgresql
+    host: localhost
+    port: 5432
+    databaseId: postgres
+    schemaId: supply
+    user: postgres
+    pass: postgres
+
+# === Historicization parameters
+schemaTemporalCategory: V  #B, T
+author: RL
+outDirPath: test-result
+temporalIntervalType: INT4RANGE
+temporalPointType: INT
+includeVXX: false
+granularity:
+executeScript: false

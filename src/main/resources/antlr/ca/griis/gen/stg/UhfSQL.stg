@@ -1,0 +1,1843 @@
+import "PostgreSQL.stg"
+/*************************************************************
+Gabarit de génération de code SQL pour une base de données historiciée pour Postgres v9.6+
+Notes :
+  * Tous les identificateurs doivent avoir un delimiteur.
+**************************************************************/
+//FIXME 2022-02-xx RL : attr_insert_xxx insertion clé avec erreur attribut faire rollback
+//TODO 2022-02-xx RL : 2.1.3 contrainte circonlocution in insert
+//TODO 2022-02-xx RL : cas insertion vxe, vbx dans bd xe, bx leve contrainte de clé unique au lieu de la contrainte spécifier
+//TODO 2022-08-29 CK : gestion de la granularité.
+//TODO 2022-09-01 CK : mettre à jour selon UHF_Base
+//TODO 2022-08-29 CK : mettre à jour selon le standard de programmation SQL de MAD.
+/*************************************************************
+Add PostgreSQL temporal extensions
+*************************************************************/
+create_gist_extension() ::=
+<<
+create extension if not exists "btree_gist";
+<\n>
+>>
+
+create_search_path(schemaSet)::=
+<<
+set search_path to <schemaSet:{e|<e.id:delimiteur()>}; separator=", ">;
+<\n>
+>>
+
+/*************************************************************
+Définition des contraintes temporelles.
+//TODO 2021-02-28 permettre un contrainte sur plusieurs attributs clés
+**************************************************************/
+
+noRedundancy(constraintId, schemaId, tableId, keyAttSet, noKeyAttId, vtId) ::=
+<<
+-- No redundancy constraint for <tableId>
+ALTER TABLE <schemaId:delimiteur()>.<tableId:delimiteur()> 
+  ADD CONSTRAINT <constraintId>_redundancy
+  EXCLUDE USING gist(<keyAttSet:{a|<a.id:delimiteur()> WITH =}; separator=", ">, <if(noKeyAttId.id)><if(noKeyAttId.fct)><noKeyAttId.id><else><noKeyAttId.id:delimiteur()><endif> WITH =, <endif><vtId:delimiteur()> WITH &&);
+<\n> 
+>>
+
+noCircumlocution(constraintId, schemaId, tableId, keyAttSet, noKeyAttId, vtId) ::=
+<<
+-- No circumlocution constraint for <tableId>
+ALTER TABLE <schemaId:delimiteur()>.<tableId:delimiteur()> 
+  ADD CONSTRAINT <constraintId>_circumlocution
+  EXCLUDE USING gist(<keyAttSet:{a|<a.id:delimiteur()> WITH =}; separator=", ">, <if(noKeyAttId.id)><if(noKeyAttId.fct)><noKeyAttId.id><else><noKeyAttId.id:delimiteur()><endif> WITH =, <endif><vtId:delimiteur()> WITH -|-);
+<\n> 
+>>
+
+noContradiction(constraintId, schemaId, tableId, keyAttSet, noKeyAttId, vtId) ::=
+<<
+-- No contradiction constraint for <tableId>
+ALTER TABLE <schemaId:delimiteur()>.<tableId:delimiteur()> 
+  ADD CONSTRAINT <constraintId>_contradiction
+  EXCLUDE USING gist(<keyAttSet:{a|<a.id:delimiteur()> WITH =}; separator=", ">, <if(noKeyAttId.id)><if(noKeyAttId.fct)><noKeyAttId.id><else><noKeyAttId.id:delimiteur()><endif> WITH \<>, <endif><vtId:delimiteur()> WITH &&);
+<\n> 
+>>
+
+constraint_drp(schemaId, tableId, type) ::=
+<<
+ALTER TABLE <schemaId:delimiteur()>.<tableId:delimiteur()>
+  DROP CONSTRAINT <constraintId>_<type>;
+<\n>
+>>
+
+temporalRedundancy_check(tableId, schemaId, keyAttSet) ::=
+<<
+-- Temporal redundancy check for : <tableId>
+create or replace function <schemaId:delimiteur()>.<tableId>_redundancy
+  (
+  )
+  returns BOOLEAN
+  language 'plpgsql'
+  volatile
+as
+$$
+declare
+  _rec RECORD;
+  _nbTuple INT;
+begin
+  with Vbe as
+    (
+      select <keyAttSet:{a|<a.id:delimiteur()>}; separator=", ">
+           , array_agg((t1.during * t2.during)::"UHF_INTERVAL") as redundancies
+      from <schemaId:delimiteur()>.<tableId> as t1
+        join <schemaId:delimiteur()>.<tableId> as t2 using (<keyAttSet:{a|<a.id:delimiteur()>}; separator=", ">)
+      where t1.during && t2.during
+        and t1.during \<> t2.during
+        and t1.during \< t2.during
+      group by (<keyAttSet:{a|<a.id:delimiteur()>}; separator=", ">)
+    )
+ select *
+  into _rec
+  from Vbe;
+  --
+  get diagnostics _nbTuple = row_count;
+  if (_nbTuple = 0) then
+    raise notice '<tableId> relation has no redundancies';
+    return true;
+  else
+    raise warning '<tableId> relation has % redundancies', _nbTuple;
+    return false;
+  end if;
+end
+$$;
+<\n>
+>>
+
+temporalNoCircumlocution_check(tableId, schemaId, keyAttSet) ::=
+<<
+-- Temporal circumlocution check for : <tableId>
+create or replace function <schemaId:delimiteur()>.<tableId>_circumlocution
+  (
+  )
+  returns BOOLEAN
+  language 'plpgsql'
+  volatile
+as
+$$
+declare
+  _rec RECORD;
+  _nbTuple INT;
+begin
+  with Vbe as
+    (
+      select <keyAttSet:{a|<a.id:delimiteur()>}; separator=", ">
+           , array_agg(uhf_interval(upper(t1.during), upper(t1.during)))
+      from <schemaId:delimiteur()>.<tableId> as t1
+        join <schemaId:delimiteur()>.<tableId> as t2 using (<keyAttSet:{a|<a.id:delimiteur()>}; separator=", ">)
+        where t1.during -|- t2.during
+              and t1.during \<> t2.during
+              and t1.during \< t2.during
+      group by (<keyAttSet:{a|<a.id:delimiteur()>}; separator=", ">)
+    )
+ select *
+  into _rec
+  from Vbe;
+  --
+  get diagnostics _nbTuple = row_count;
+  if (_nbTuple = 0) then
+    raise notice '<tableId> relation has no circumlocution';
+    return true;
+  else
+    raise warning '<tableId> relation has % circumlocution', _nbTuple;
+    return false;
+  end if;
+end
+$$;
+<\n>
+>>
+
+temporalNoContradiction_check(tableId, schemaId, keyAttSet, noKeyAttId) ::=
+<<
+-- Temporal contradiction check for : <tableId>
+create or replace function <schemaId:delimiteur()>.<tableId>_contradiction
+  (
+  )
+  returns BOOLEAN
+  language 'plpgsql'
+  volatile
+as
+$$
+declare
+  _rec RECORD;
+  _nbTuple INT;
+begin
+  with Vbe as
+    (
+      select <keyAttSet:{a|<a.id:delimiteur()>}; separator=", ">
+        , array_agg(distinct t1.<noKeyAttId.id:delimiteur()>) as <noKeyAttId.id>Array
+        , array_agg(distinct (t1.during * t2.during)::"UHF_INTERVAL")
+      from <schemaId:delimiteur()>.<tableId> as t1
+        join <schemaId:delimiteur()>.<tableId> as t2 using (<keyAttSet:{a|<a.id:delimiteur()>}; separator=", ">)
+      where t1.<noKeyAttId.id:delimiteur()> \<> t2.<noKeyAttId.id:delimiteur()>
+        and t1.during && t2.during
+        and t1.during \<> t2.during
+      group by <keyAttSet:{a|<a.id:delimiteur()>}; separator=", ">
+      )
+  select *
+  into _rec
+  from Vbe;
+  --
+  get diagnostics _nbTuple = row_count;
+  if (_nbTuple = 0) then
+    raise notice '<tableId> relation has no contradiction';
+    return true;
+  ELSE
+    raise warning '<tableId> has % contradiction', _nbTuple;
+    return false;
+  end if;
+end
+$$;
+<\n>
+>>
+
+temporalFk_check(constraintId, schemaId, orgTableId, dstTableId, keyAttMap, orgTemporalAttId, dstTemporalAttId) ::=
+<<
+-- Temporal foreign key check for : <orgTableId>
+CREATE OR REPLACE FUNCTION <schemaId:delimiteur()>.<constraintId>Temporal_check()
+RETURNS BOOLEAN AS
+  $$
+  SELECT count(*) > 0
+  FROM <schemaId:delimiteur()>.<orgTableId:delimiteur()> AS org JOIN <schemaId:delimiteur()>.<dstTableId:delimiteur()> AS dst 
+    ON(<keyAttMap:{a|org.<a.orgAttId:delimiteur()> = dst.<a.dstAttId:delimiteur()>}; separator=" AND ">)
+  WHERE org.<orgTemporalAttId:delimiteur()> \<@ dst.<dstTemporalAttId:delimiteur()>;
+  $$
+  LANGUAGE SQL;
+<\n>
+>>
+
+//redundancy
+temporalUniqueness_check(constraintId, schemaId, tableId, vxeTableId, vbeTableId, vbxTableId, vxeAtt, vbeAtt, vbxAtt, keySet)::=
+<<
+-- Temporal coherence check for : <tableId>
+CREATE OR REPLACE FUNCTION <schemaId:delimiteur()>.<constraintId>_history_redundancy
+  (
+  )
+  RETURNS BOOLEAN
+  language 'plpgsql'
+  volatile
+AS
+$$
+declare
+  _rec RECORD;
+  _nbTuple INT;
+begin
+  WITH coherence AS (
+    SELECT <keySet:{a|<a.id:delimiteur()>}; separator=", ">
+    FROM <schemaId:delimiteur()>.<vbxTableId:delimiteur()> NATURAL JOIN <schemaId:delimiteur()>.<vbeTableId:delimiteur()>
+    WHERE <vbxAtt> \< <schemaId:delimiteur()>.post(<vbeAtt>) 
+    UNION
+    SELECT <keySet:{a|<a.id:delimiteur()>}; separator=", ">
+    FROM <schemaId:delimiteur()>.<vbeTableId:delimiteur()> NATURAL JOIN <schemaId:delimiteur()>.<vxeTableId:delimiteur()>
+    WHERE <vxeAtt> > <schemaId:delimiteur()>.pre(<vbeAtt>) 
+    UNION
+    SELECT <keySet:{a|<a.id:delimiteur()>}; separator=", ">
+    FROM <schemaId:delimiteur()>.<vxeTableId:delimiteur()> NATURAL JOIN <schemaId:delimiteur()>.<vbxTableId:delimiteur()>
+    WHERE <vxeAtt> > <vbxAtt>
+  )
+select *
+into _rec
+from coherence;
+ --
+  get diagnostics _nbTuple = row_count;
+  if (_nbTuple = 0) then
+    raise notice '<tableId> history relation has no redundancies';
+    return true;
+  else
+    raise warning '<tableId> history has % redundancies', _nbTuple;
+    return false;
+  end if;
+end
+$$;<\n>
+>>
+
+temporalCircumlocution_check(constraintId, schemaId, tableId, vxeTableId, vbeTableId, vbxTableId, vxeAtt, vbeAtt, vbxAtt, keySet)::=
+<<
+-- Temporal coherence check for : <tableId>
+CREATE OR REPLACE FUNCTION <schemaId:delimiteur()>.<constraintId>_history_circumlocution()
+RETURNS BOOLEAN AS
+  $$
+  WITH coherence AS (
+    SELECT <keySet:{a|<a.id:delimiteur()>}; separator=", ">
+    FROM <schemaId:delimiteur()>.<vbxTableId:delimiteur()> NATURAL JOIN <schemaId:delimiteur()>.<vbeTableId:delimiteur()>
+    WHERE <vbxAtt> = <schemaId:delimiteur()>.post(<vbeAtt>) 
+    UNION
+    SELECT <keySet:{a|<a.id:delimiteur()>}; separator=", ">
+    FROM <schemaId:delimiteur()>.<vbeTableId:delimiteur()> NATURAL JOIN <schemaId:delimiteur()>.<vxeTableId:delimiteur()>
+    WHERE <vxeAtt> = <schemaId:delimiteur()>.pre(<vbeAtt>) 
+    UNION
+    SELECT <keySet:{a|<a.id:delimiteur()>}; separator=", ">
+    FROM <schemaId:delimiteur()>.<vxeTableId:delimiteur()> NATURAL JOIN <schemaId:delimiteur()>.<vbxTableId:delimiteur()>
+    WHERE <vxeAtt> = <vbxAtt>
+  )
+  SELECT count(*) = 0
+  FROM coherence;
+  $$
+  LANGUAGE SQL;
+<\n>
+>>
+
+temporalContradiction_check(constraintId, schemaId, tableId, vxeTableId, vbeTableId, vbxTableId, vxeAtt, vbeAtt, vbxAtt, keySet, NoKeyAtt)::=
+<<
+-- Temporal coherence check for : <tableId>
+CREATE OR REPLACE FUNCTION <schemaId:delimiteur()>.<constraintId>_history_contradiction()
+RETURNS BOOLEAN AS
+  $$
+  WITH coherence AS (
+    SELECT <keySet:{a|<a.id:delimiteur()>}; separator=", ">, <NoKeyAtt>
+    FROM <schemaId:delimiteur()>.<vbxTableId:delimiteur()> NATURAL JOIN <schemaId:delimiteur()>.<vbeTableId:delimiteur()>
+    WHERE <vbxAtt> \< <schemaId:delimiteur()>.post(<vbeAtt>) AND <vbxTableId>.<NoKeyAtt> \<> <vbeTableId>.<NoKeyAtt>
+    UNION
+    SELECT <keySet:{a|<a.id:delimiteur()>}; separator=", ">, <NoKeyAtt>
+    FROM <schemaId:delimiteur()>.<vbeTableId:delimiteur()> NATURAL JOIN <schemaId:delimiteur()>.<vxeTableId:delimiteur()>
+    WHERE <vxeAtt> > <schemaId:delimiteur()>.pre(<vbeAtt>) AND <vxeTableId>.<NoKeyAtt> \<> <vbeTableId>.<NoKeyAtt>
+    UNION
+    SELECT <keySet:{a|<a.id:delimiteur()>}; separator=", ">, <NoKeyAtt>
+    FROM <schemaId:delimiteur()>.<vxeTableId:delimiteur()> NATURAL JOIN <schemaId:delimiteur()>.<vbxTableId:delimiteur()>
+    WHERE <vxeAtt> > <vbxAtt> AND <vxeTableId>.<NoKeyAtt> \<> <vbxTableId>.<NoKeyAtt>
+  )
+  SELECT count(*) = 0
+  FROM coherence;
+  $$
+  LANGUAGE SQL;
+<\n>
+>>
+
+temporalDenseness_check(schemaId, tableSourceID, tableAttId, inTemporalType, vxeAtt, vbeAtt, vbxAtt, keySet)::=
+<<
+------ Denseness
+-- Limiter l'expansion (unpack) de la relation en fournissant une valeur saw et ufn.
+create or replace function <schemaId:delimiteur()>.<tableSourceID>_<tableAttId>_denseness
+  (
+    saw <schemaId:delimiteur()>.<inTemporalType:delimiteur()>, ufn <schemaId:delimiteur()>.<inTemporalType:delimiteur()>
+  )
+  returns BOOLEAN
+  language 'plpgsql'
+  volatile
+as
+$$
+declare
+  _rec RECORD;
+  _nbTuple INT;
+begin
+  with <tableSourceID>_grouping as
+    (
+      select <keySet:{a|<a.id:delimiteur()>}; separator=", ">, unpack(<vbxAtt>, ufn) as v
+      from <tableSourceID>_<vbxAtt>
+      union
+      select <keySet:{a|<a.id:delimiteur()>}; separator=", ">, unpack(<vbeAtt>) as v
+      from <tableSourceID>_<vbeAtt>
+      union
+      select <keySet:{a|<a.id:delimiteur()>}; separator=", ">, unpack(<vxeAtt>, saw) as v
+      from <tableSourceID>_<vxeAtt>
+    ),
+    <tableAttId>_grouping as
+      (
+        select <keySet:{a|<a.id:delimiteur()>}; separator=", ">, unpack(<vbxAtt>, ufn) as v
+        from <tableAttId>_<vbxAtt>
+        union
+        select <keySet:{a|<a.id:delimiteur()>}; separator=", ">, unpack(<vbeAtt>) as v
+        from <tableAttId>_<vbeAtt>
+        union
+        select <keySet:{a|<a.id:delimiteur()>}; separator=", ">, unpack(<vxeAtt>, saw) as v
+        from <tableAttId>_<vxeAtt>
+        ),
+    grouping as
+      (
+        select *, '<tableSourceID>' as table_grouping
+        from <tableSourceID>_grouping
+        except
+        select *, '<tableSourceID>' as table_grouping
+        from <tableAttId>_grouping
+        union
+        select *, '<tableAttId>' as table_grouping
+        from <tableAttId>_grouping
+        except
+        select *, '<tableAttId>' as table_grouping
+        from <tableSourceID>_grouping
+        )
+  select *
+  into _rec
+  from grouping;
+  --
+  get diagnostics _nbTuple = row_count;
+  if (_nbTuple = 0) then
+    raise notice '<tableSourceID> and <tableAttId> are dense';
+    return true;
+  else
+    raise warning '<tableSourceID> and <tableAttId> are not dense';
+    return false;
+  end if;
+end
+$$;
+<\n>
+>>
+
+/*************************************************************
+Définition des fonctions de contruction d'intervalle.
+function : daterange or tsrange
+**************************************************************/
+createInterval_func(schemaId, inTemporalType, outTemporalType, begin, end, function) ::=
+<<
+create or replace function <schemaId:delimiteur()>.uhf_interval(<begin> <if(begin)><schemaId:delimiteur()>.<inTemporalType:delimiteur()><endif><if(end)>, <end> <schemaId:delimiteur()>.<inTemporalType:delimiteur()><endif>)
+  returns <schemaId:delimiteur()>.<outTemporalType:delimiteur()>
+  language SQL
+  immutable
+  as
+    $$
+      SELECT <function>(<begin>, <if(end)><end><else>null<endif>, '[]')::<schemaId:delimiteur()>.<outTemporalType:delimiteur()>;
+    $$;
+<\n>
+>>
+
+create_vxx_func(schemaId, inTemporalType, outTemporalType, function) ::=
+<<
+CREATE OR REPLACE FUNCTION <schemaId:delimiteur()>.uhf_interval()
+  RETURNS <schemaId:delimiteur()>.<outTemporalType:delimiteur()>
+  AS $$ SELECT <function>(null, null, '[]')::<schemaId:delimiteur()>.<outTemporalType:delimiteur()>; $$
+  LANGUAGE SQL
+  IMMUTABLE
+  RETURNS NULL ON NULL INPUT;
+<\n>
+>>
+
+create_vxe_func(schemaId, inTemporalType, outTemporalType, function) ::=
+<<
+CREATE OR REPLACE FUNCTION <schemaId:delimiteur()>.uhf_interval(_end <schemaId:delimiteur()>.<inTemporalType:delimiteur()>)
+  RETURNS <schemaId:delimiteur()>.<outTemporalType:delimiteur()>
+  AS $$ SELECT <function>(null, _end, '[]')::<schemaId:delimiteur()>.<outTemporalType:delimiteur()>; $$
+  LANGUAGE SQL
+  IMMUTABLE
+  RETURNS NULL ON NULL INPUT;
+<\n> 
+>>
+
+create_vbx_func(schemaId, inTemporalType, outTemporalType, function) ::=
+<<
+CREATE OR REPLACE FUNCTION <schemaId:delimiteur()>.uhf_interval(_begin <schemaId:delimiteur()>.<inTemporalType:delimiteur()>)
+  RETURNS <schemaId:delimiteur()>.<outTemporalType:delimiteur()>
+  AS $$ SELECT <function>(_begin, null, '[]')::<schemaId:delimiteur()>.<outTemporalType:delimiteur()>; $$
+  LANGUAGE SQL
+  IMMUTABLE
+  RETURNS NULL ON NULL INPUT;
+<\n>
+>>
+
+createPointPre_func(schemaId, inTemporalType, outTemporalType, granularity) ::=
+<<
+CREATE OR REPLACE FUNCTION <schemaId:delimiteur()>.pre(p <schemaId:delimiteur()>.<inTemporalType:delimiteur()>)
+  RETURNS <schemaId:delimiteur()>.<outTemporalType:delimiteur()>
+  AS $$
+      SELECT (p <if(granularity)>- INTERVAL '1 <granularity>'<else>- 1<endif>)::<schemaId:delimiteur()>.<outTemporalType:delimiteur()>;
+     $$
+  LANGUAGE SQL
+  IMMUTABLE
+  RETURNS NULL ON NULL INPUT;
+<\n>
+>>
+
+createIntervalPre_func(schemaId, inTemporalType, outTemporalType, granularity) ::=
+<<
+CREATE OR REPLACE FUNCTION <schemaId:delimiteur()>.pre(i <schemaId:delimiteur()>.<inTemporalType:delimiteur()>)
+  RETURNS <schemaId:delimiteur()>.<outTemporalType:delimiteur()>
+  AS $$
+       SELECT ibegin(i)::<schemaId:delimiteur()>.<outTemporalType:delimiteur()>;
+     $$
+  LANGUAGE SQL
+  IMMUTABLE
+  RETURNS NULL ON NULL INPUT;
+<\n>
+>>
+
+createPointPost_func(schemaId, inTemporalType, outTemporalType, granularity) ::=
+<<
+CREATE OR REPLACE FUNCTION <schemaId:delimiteur()>.post(p <schemaId:delimiteur()>.<inTemporalType:delimiteur()>)
+  RETURNS <schemaId:delimiteur()>.<outTemporalType:delimiteur()>
+  AS $$
+      SELECT (p <if(granularity)>+ INTERVAL '1 <granularity>'<else>+ 1<endif>)::<schemaId:delimiteur()>.<outTemporalType:delimiteur()> ;
+     $$
+  LANGUAGE SQL
+  IMMUTABLE
+  RETURNS NULL ON NULL INPUT;
+<\n>
+>>
+
+createIntervalPost_func(schemaId, inTemporalType, outTemporalType, granularity) ::=
+<<
+CREATE OR REPLACE FUNCTION <schemaId:delimiteur()>.post(i <schemaId:delimiteur()>.<inTemporalType:delimiteur()>)
+  RETURNS <schemaId:delimiteur()>.<outTemporalType:delimiteur()>
+  AS $$
+        SELECT iend(i)::<schemaId:delimiteur()>.<outTemporalType:delimiteur()>;
+     $$
+  LANGUAGE SQL
+  IMMUTABLE
+  RETURNS NULL ON NULL INPUT;
+<\n>
+>>
+
+createUnpackInterval_func(schemaId, inTemporalType, outTemporalType, convertTemporalType) ::=
+<<
+create or replace function <schemaId:delimiteur()>.unpack_interval(a <schemaId:delimiteur()>.<inTemporalType:delimiteur()>)
+  returns setof <schemaId:delimiteur()>.<outTemporalType:delimiteur()>
+  as $$
+        select uhf_interval(s.p::<schemaId:delimiteur()>.<convertTemporalType:delimiteur()>, s.p::<schemaId:delimiteur()>.<convertTemporalType:delimiteur()>)
+        from generate_series(ibegin(a), iend(a), 1) as s(p);
+     $$
+  language sql
+  immutable
+  strict;
+<\n>
+>>
+
+createUnpackIntervalPoint_func(schemaId, inTemporalType, outTemporalType, convertTemporalType) ::=
+<<
+create or replace function <schemaId:delimiteur()>.unpack(a <schemaId:delimiteur()>.<inTemporalType:delimiteur()>)
+  returns setof <schemaId:delimiteur()>.<outTemporalType:delimiteur()>
+  as $$
+        select s.p::<schemaId:delimiteur()>.<convertTemporalType:delimiteur()>
+        from generate_series(ibegin(a), iend(a), 1) as s(p);
+     $$
+  language sql immutable strict;
+<\n>
+>>
+
+createUnpack_func(schemaId, inTemporalType, outTemporalType, convertTemporalType, function) ::=
+<<
+-- Special case for
+create or replace function <schemaId:delimiteur()>.unpack(a <schemaId:delimiteur()>.<inTemporalType:delimiteur()>)
+  returns setof <schemaId:delimiteur()>.<outTemporalType:delimiteur()>
+as $$ select s.p::<schemaId:delimiteur()>.<convertTemporalType:delimiteur()> from <function> as s(p); $$
+  language sql immutable strict;
+<\n>
+>>
+
+//Limit expansion using ufn & saw
+createUnpackParams_func(schemaId, inValidTemporalType, inTemporalType, outTemporalType, convertTemporalType, function) ::=
+<<
+-- Limit expansion using
+create or replace function <schemaId:delimiteur()>.unpack
+  (
+    a <schemaId:delimiteur()>.<inValidTemporalType:delimiteur()>, b <schemaId:delimiteur()>.<inTemporalType:delimiteur()>
+  )
+  returns setof <schemaId:delimiteur()>.<outTemporalType:delimiteur()>
+as
+$$
+select s.p::<schemaId:delimiteur()>.<convertTemporalType:delimiteur()> from <function> as s(p);
+$$
+  language sql
+  immutable
+  strict;
+<\n>
+>>
+
+createIbegin_func(schemaId, inTemporalType, outTemporalType, convertTemporalType) ::=
+<<
+-- ==== BEGIN
+-- Interval bounds can be null.
+create or replace function <schemaId:delimiteur()>.ibegin
+  (
+    i <schemaId:delimiteur()>.<inTemporalType:delimiteur()>
+  )
+  returns <schemaId:delimiteur()>.<outTemporalType:delimiteur()>
+  language sql
+  immutable
+  strict
+as
+$$
+select case
+         when lower(i) is null then first()::<schemaId:delimiteur()>.<convertTemporalType:delimiteur()>
+         when lower_inc(i) then lower(i)::<schemaId:delimiteur()>.<convertTemporalType:delimiteur()>
+         else post(lower(i))::<schemaId:delimiteur()>.<convertTemporalType:delimiteur()>
+  end;
+$$;
+<\n>
+>>
+
+createIend_func(schemaId, inTemporalType, outTemporalType, convertTemporalType) ::=
+<<
+-- ==== END
+-- NOTE : upper_inc(i) peut retourner vrai seulement avec des types continus.
+--   https://www.postgresql.org/message-id/CAKFQuwai8tKghXz87ctxx9WFEwMqpbH4_j2vWnhXudmYx-y2hw%40mail.gmail.com
+--
+create or replace function <schemaId:delimiteur()>.iend
+  (
+    i <schemaId:delimiteur()>.<inTemporalType:delimiteur()>
+  )
+  returns <schemaId:delimiteur()>.<outTemporalType:delimiteur()>
+  language sql
+  immutable
+  strict
+as
+$$
+   select case
+     when (upper(i) is null and upper_inc(i)) then last()
+     when (upper(i) is null and not upper_inc(i)) then pre(last()) -- REVUE
+     when upper_inc(i) then upper(i)::<schemaId:delimiteur()>.<convertTemporalType:delimiteur()>
+     else pre(upper(i))::<schemaId:delimiteur()>.<convertTemporalType:delimiteur()>
+   end;
+$$;
+<\n>
+>>
+
+createFirst_func(schemaId, firstValue, outTemporalType, convertTemporalType) ::=
+<<
+-- ==== FIRST
+-- No function available to get the minimum value of a type
+-- One must be defined according to the application requirement.
+create or replace function <schemaId:delimiteur()>.first()
+  returns <schemaId:delimiteur()>.<outTemporalType:delimiteur()>
+as
+$$
+select <firstValue>::<schemaId:delimiteur()>.<convertTemporalType:delimiteur()>;
+$$
+  language sql
+  immutable
+  strict;
+<\n>
+>>
+
+createLast_func(schemaId, lastValue, outTemporalType, convertTemporalType) ::=
+<<
+-- ==== LAST
+-- No function available to get the maximum value of a type
+-- One must be defined according to the application requirement.
+create or replace function <schemaId:delimiteur()>.last
+  (
+  )
+  returns <schemaId:delimiteur()>.<outTemporalType:delimiteur()>
+as
+$$
+select <lastValue>::<schemaId:delimiteur()>.<convertTemporalType:delimiteur()>;
+$$
+  language sql
+  immutable
+  strict;
+<\n>
+>>
+
+/*************************************************************
+Définition requête temporalle par défauts
+**************************************************************/
+simple_query(schemaId, tableId, attSet) ::=
+<<
+SELECT <attSet:{a|<if(a.fct)><schemaId:delimiteur()>.<a.id><else><a.id:delimiteur()><endif> <if(a.alias)>AS <a.alias:delimiteur()><endif>}; separator=",  \n  ">
+FROM <schemaId:delimiteur()>.<tableId:delimiteur()>
+>>
+
+/*************************************************************
+Définition d'une vue historique
+**************************************************************/
+history_view(schemaId, viewId, vxeQuery, vbeQuery, vbxQuery, vxxQuery)::=
+<<
+CREATE OR REPLACE VIEW <schemaId:delimiteur()><if(schemaId)>.<endif><viewId:delimiteur()> AS
+  <vxxQuery>
+  <if(vxxQuery)>UNION<endif>
+  <vxeQuery>
+  UNION
+  <vbxQuery>
+  UNION
+  <vbeQuery>
+;
+<\n>
+>>
+
+history_view_def(schemaId, vueId, def) ::=
+<<
+COMMENT ON VIEW <schemaId:delimiteur()><if(schemaId)>.<endif><vueId:delimiteur()> IS '<def>';
+<\n>
+>>
+
+/*************************************************************
+ Création de procédure stockée pour l'intertion
+*************************************************************/
+valid_insert(schemaId, relvarId, temporalAtt, vbxAtt, vxeAtt, vbeAtt, attSet, keyAttSet, noKeyAttSet, temporalPointType) ::=
+<<
+CREATE OR REPLACE PROCEDURE <schemaId:delimiteur()>.insert_<relvarId>_history(<attSet:{a|_<a.id> <if(a.fct)><a.type><else><schemaId:delimiteur()>.<a.type:delimiteur()><endif>}; separator=", ">, _<temporalAtt.id> <schemaId:delimiteur()>.<temporalAtt.type:delimiteur()>)
+AS
+$$
+declare
+    err_msg  TEXT;
+    _bx  <temporalPointType>;
+    _xe  <temporalPointType>;
+    _be  <schemaId:delimiteur()>.<vbeAtt.type:delimiteur()>[];
+begin
+
+
+    -- verification état de BD
+    SELECT <vbxAtt.id:delimiteur()> into _bx from <relvarId>_<vbxAtt.id> where <keyAttSet:{a|<a.id> = _<a.id>}; separator=" AND ">;
+    SELECT <vxeAtt.id:delimiteur()> into _xe from <relvarId>_<vxeAtt.id> where <keyAttSet:{a|<a.id> = _<a.id>}; separator=" AND ">;
+    SELECT array_agg(<vbeAtt.id:delimiteur()>) into _be from <relvarId>_<vbeAtt.id> where <keyAttSet:{a|<a.id> = _<a.id>}; separator=" AND ">;
+
+    -- 0 vide
+    IF (_xe is null and _be is null and _bx is null) THEN
+        call insert_<relvarId>(<keyAttSet:{a|_<a.id>}; separator=", ">, _<temporalAtt.id>);
+        <noKeyAttSet:{a|call insert_<relvarId>_<a.id>(<keyAttSet:{a|_<a.id>}; separator=", ">, _<a.id>, _<temporalAtt.id>); }; separator="\n">
+    END IF;
+
+    <if(noKeyAttSet)>
+    -- 1
+    IF (_xe is not null and _be is null and _bx is null) THEN
+        call insert_<relvarId>(<keyAttSet:{a|_<a.id>}; separator=", ">, _<temporalAtt.id>);
+        <noKeyAttSet:{a|call insert_<relvarId>_<a.id>_vxe(<keyAttSet:{a|_<a.id>}; separator=", ">, _<a.id>, _<temporalAtt.id>, _xe); }; separator="\n">
+    END IF;
+
+    -- 2
+    IF (_xe is not null and cardinality(_be) = 1) THEN
+        call insert_<relvarId>(<keyAttSet:{a|_<a.id>}; separator=", ">, _<temporalAtt.id>);
+        <noKeyAttSet:{a|call insert_<relvarId>_<a.id>_vxe_vbe(<keyAttSet:{a|_<a.id>}; separator=", ">, _<a.id>, _<temporalAtt.id>, _xe, _be); }; separator="\n">
+    END IF;
+
+    -- 3
+    IF (_xe is not null and _bx is not null and _be IS NULL) THEN
+        call insert_<relvarId>(<keyAttSet:{a|_<a.id>}; separator=", ">, _<temporalAtt.id>);
+        <noKeyAttSet:{a|call insert_<relvarId>_<a.id>_vxe_vbx(<keyAttSet:{a|_<a.id>}; separator=", ">, _<a.id>, _<temporalAtt.id>, _xe, _bx); }; separator="\n">
+    END IF;
+
+    -- 4
+    IF (_xe is null and _bx is null and cardinality(_be) = 1) THEN
+        call insert_<relvarId>(<keyAttSet:{a|_<a.id>}; separator=", ">, _<temporalAtt.id>);
+        <noKeyAttSet:{a|call insert_<relvarId>_<a.id>_vbe(<keyAttSet:{a|_<a.id>}; separator=", ">, _<a.id>, _<temporalAtt.id>, _be); }; separator="\n">
+    END IF;
+
+    -- 5
+    IF (_xe is null and _bx is null and cardinality(_be) = 2) THEN
+        call insert_<relvarId>(<keyAttSet:{a|_<a.id>}; separator=", ">, _<temporalAtt.id>);
+        <noKeyAttSet:{a|call insert_<relvarId>_<a.id>_vbe_vbe(<keyAttSet:{a|_<a.id>}; separator=", ">, _<a.id>, _<temporalAtt.id>, _be); }; separator="\n">
+    END IF;
+
+    -- 6
+    IF (_xe is null and _bx is not null and cardinality(_be) = 1) THEN
+        call insert_<relvarId>(<keyAttSet:{a|_<a.id>}; separator=", ">, _<temporalAtt.id>);
+        <noKeyAttSet:{a|call insert_<relvarId>_<a.id>_vbe_vbx(<keyAttSet:{a|_<a.id>}; separator=", ">, _<a.id>, _<temporalAtt.id>, _be, _bx); }; separator="\n">
+    END IF;
+
+    -- 7
+    IF (_xe is null and _bx is not null and _be is null) THEN
+        call insert_<relvarId>(<keyAttSet:{a|_<a.id>}; separator=", ">, _<temporalAtt.id>);
+        <noKeyAttSet:{a|call insert_<relvarId>_<a.id>_vbx(<keyAttSet:{a|_<a.id>}; separator=", ">, _<a.id>, _<temporalAtt.id>, _bx); }; separator="\n">
+    END IF;
+
+    <endif>
+
+EXCEPTION
+    WHEN OTHERS THEN
+        GET STACKED DIAGNOSTICS err_msg = MESSAGE_TEXT;
+        RAISE EXCEPTION 'Insert into insert_<relvarId>_history: %', err_msg;
+END;
+$$
+    LANGUAGE 'plpgsql';
+<\n>
+>>
+
+attr_insert_vxe(schemaId, groupingId, temporalAtt, attSet, keyAttSet, noKeyAttId, vxxRelpartId, vxeRelpartId, vbxRelpartId, vbeRelpartId, temporalPointType, temporalIntervalType) ::=
+<<
+CREATE OR REPLACE PROCEDURE <schemaId:delimiteur()>.insert_<groupingId>_vxe(<attSet:{a|_<a.id> <if(a.fct)><a.type><else><schemaId:delimiteur()>.<a.type:delimiteur()><endif>}; separator=", ">, _<temporalAtt.id> <schemaId:delimiteur()>.<temporalAtt.type:delimiteur()>, _vxe <temporalPointType>)
+ AS
+  $$
+  DECLARE
+    err_msg TEXT;
+    _isVxeBeforeBegin boolean;
+    _isVxeAfterEnd    boolean;
+    _isVxeAfterBegin  boolean;
+    _isVxeBeforeEnd   boolean;
+    _vxeEquals        boolean;
+    _vxeAtt           boolean;
+  BEGIN
+
+    SELECT <noKeyAttId:delimiteur()> = _<noKeyAttId> INTO _vxeAtt FROM <vxeRelpartId:delimiteur()> WHERE <keyAttSet:{a|<a.id> = _<a.id>}; separator=" AND "> AND <noKeyAttId:delimiteur()> = _<noKeyAttId>;
+
+    _vxeEquals := _vxe = lower(_<temporalAtt.id>);
+
+    _isVxeBeforeBegin := _vxe \< lower(_<temporalAtt.id>);
+    _isVxeAfterEnd    := _vxe > upper(_<temporalAtt.id>);
+
+    _isVxeAfterBegin :=  _vxe > lower(_<temporalAtt.id>);
+    _isVxeBeforeEnd  :=   _vxe \< upper(_<temporalAtt.id>);
+
+    RAISE LOG 'État de db : VXE';
+    -- Vx
+    IF lower(_<temporalAtt.id>) IS NULL THEN
+      IF upper(_<temporalAtt.id>) IS NULL THEN
+        RAISE NOTICE 'INSERT vxx';
+      <if(vxxRelpartId)>
+        <insertion_temp(schemaId, vxxRelpartId, attSet, false, false, "")>
+      <endif>
+      ELSE
+        RAISE NOTICE 'INSERT vxe';
+            IF (_isVxeAfterEnd) Then
+                RAISE LOG 'Cas 1.4 : -x--------f--e----------';
+                IF (_vxeAtt) Then
+                    RAISE LOG 'Cas 1.4.0';
+                    RAISE WARNING 'E : redondance sur [saw,f:%]', upper(_<temporalAtt.id>);
+                ELSE
+                    RAISE LOG 'Cas 1.4.1';
+                    RAISE WARNING 'E : contradiction sur [saw,f:%]', upper(_<temporalAtt.id>);
+                END IF;
+            ELSE
+                RAISE NOTICE 'Cas 1.5-1.7 : -x-----------e----f-----';
+                IF (_vxeAtt) Then
+                    RAISE LOG 'Cas : 1.5.0-1.7.0';
+                    RAISE WARNING 'E : redondance sur [saw,e:%]', _vxe;
+                ELSE
+                    RAISE LOG 'Cas : 1.5.1-1.7.1';
+                    RAISE WARNING 'E : contradiction sur [saw,e:%]', _vxe;
+                END IF;
+            END IF;
+      END IF;
+    -- Vb
+    ELSE
+        IF upper(_<temporalAtt.id>) IS NULL THEN
+            RAISE NOTICE 'INSERT vbx';
+
+            -- 1.8, 1.9
+            IF (_isVxeAfterBegin) THEN
+                RAISE NOTICE 'Cas 1.8, 1.9 : -x---d-------e--------';
+                IF (_vxeAtt) Then
+                    RAISE NOTICE 'cas 1.8.0, 1.9.0';
+                    RAISE WARNING 'E : redondance sur [d:%,e:%]', lower(_<temporalAtt.id>), _vxe;
+                ELSE
+                    RAISE NOTICE 'Cas 1.8.1, 1.9.1';
+                    RAISE WARNING 'E : contradiction sur [d:%,e:%]', lower(_<temporalAtt.id>), _vxe;
+                END IF;
+            END IF;
+
+            -- Cas 1.10
+            IF (_vxeEquals) THEN
+                RAISE NOTICE 'Cas 1.10 : -x-----------ed--------';
+                IF (_vxeAtt) Then
+                    RAISE LOG 'Cas 1.10.0';
+                    RAISE WARNING 'E : circonlocution sur [e:%,d:%]', _vxe, lower(_<temporalAtt.id>);
+                ELSE
+                    RAISE LOG 'Cas 1.10.1';
+                    RAISE EXCEPTION 'IMPOSSIBLE';
+                END IF;
+            END IF;
+
+            -- cas 1.11
+            IF (_isVxeBeforeBegin) THEN
+                RAISE NOTICE 'Cas 1.11 : -x-----------e--d------';
+                RAISE NOTICE 'T : ins@bx(k, v, [d:%,ufn])', lower(_<temporalAtt.id>);
+                <insertion_temp(schemaId, vbxRelpartId, attSet, "since", temporalAtt, "lower")>
+            END IF;
+
+        ELSE
+            RAISE NOTICE 'INSERT vbe';
+                -- case 1.0
+                IF (_isVxeAfterEnd) THEN
+                    RAISE LOG 'Cas 1.0 : -x---d----f--e---------';
+                    IF (_vxeAtt) Then
+                        RAISE LOG 'Cas 1.0.0';
+                        RAISE WARNING 'E : redondance sur [d:%,f:%]', lower(_<temporalAtt.id>), upper(_<temporalAtt.id>);
+                    ELSE
+                        RAISE LOG 'Cas 1.0.1';
+                        RAISE WARNING 'E : contradiction sur [d:%,f:%]', lower(_<temporalAtt.id>), upper(_<temporalAtt.id>);
+                    END IF;
+                END IF;
+
+                -- case 1.1
+                IF (_isVxeAfterBegin and _isVxeBeforeEnd) THEN
+                    RAISE LOG 'Cas 1.1 : -x---d-------e--f------';
+                    IF (_vxeAtt) Then
+                        RAISE LOG 'Cas 1.1.0';
+                        RAISE WARNING 'E : redondance sur [d:%,e:%]', lower(_<temporalAtt.id>), _vxe;
+                    ELSE
+                        RAISE LOG 'Cas 1.1.1';
+                        RAISE WARNING 'E : contradiction sur [d:%,e:%]', lower(_<temporalAtt.id>), _vxe;
+                    END IF;
+                END IF;
+
+                -- case 1.2
+                IF (_vxeEquals) THEN
+                    RAISE LOG 'Cas 1.2 : -x-----------ed---f----';
+                    IF (_vxeAtt) Then
+                        RAISE LOG 'Cas 1.2.0';
+                        RAISE WARNING 'E : circonlocution sur [e:%,d:%]', _vxe, lower(_<temporalAtt.id>);
+                    ELSE
+                        RAISE LOG 'Cas 1.2.1';
+                        RAISE NOTICE 'T : ins@be(k, v, [d:%,f:%])', lower(_<temporalAtt.id>), upper(_<temporalAtt.id>);
+                        <insertion_temp(schemaId, vbeRelpartId, attSet, "during", temporalAtt, "")>
+                    END IF;
+                END IF;
+
+                -- case 1.3
+                IF (_isVxeBeforeBegin) THEN
+                    RAISE LOG 'Cas 1.3 : -x-----------e--d----f-';
+                    RAISE NOTICE 'T : ins@be(k, v, [%, %])', lower(_<temporalAtt.id>), upper(_<temporalAtt.id>);
+                    <insertion_temp(schemaId, vbeRelpartId, attSet, "during", temporalAtt, "")>
+                END IF;
+        END IF;
+    END IF;
+
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS err_msg = MESSAGE_TEXT;
+    RAISE EXCEPTION 'Insert into <groupingId>_vxe: %', err_msg;
+  END;
+  $$
+  LANGUAGE 'plpgsql';
+<\n>
+>>
+
+attr_insert_vxe_vbe(schemaId, groupingId, temporalAtt, attSet, keyAttSet, noKeyAttId, vxxRelpartId, vxeRelpartId, vbxRelpartId, vbeRelpartId, temporalPointType, temporalIntervalType) ::=
+<<
+CREATE OR REPLACE PROCEDURE <schemaId:delimiteur()>.insert_<groupingId>_vxe_vbe(<attSet:{a|_<a.id> <if(a.fct)><a.type><else><schemaId:delimiteur()>.<a.type:delimiteur()><endif>}; separator=", ">, _<temporalAtt.id> <schemaId:delimiteur()>.<temporalAtt.type:delimiteur()>, _vxe <temporalPointType>, _vbe <temporalIntervalType>[])
+ AS
+  $$
+  DECLARE
+    err_msg TEXT;
+    _vxeAtt boolean;
+    _vbeAtt boolean;
+    _isVxeBeforeEnd boolean;
+    _lowerBeforeVxe boolean;
+    _vbeEquals boolean;
+    _vxeEquals boolean;
+    _vbeInclude boolean;
+  BEGIN
+
+    SELECT <noKeyAttId:delimiteur()> = _<noKeyAttId> INTO _vxeAtt FROM <vxeRelpartId:delimiteur()> WHERE <keyAttSet:{a|<a.id> = _<a.id>}; separator=" AND "> AND <noKeyAttId:delimiteur()> = _<noKeyAttId>;
+    SELECT <noKeyAttId:delimiteur()> = _<noKeyAttId> INTO _vbeAtt FROM <vbeRelpartId:delimiteur()> WHERE <keyAttSet:{a|<a.id> = _<a.id>}; separator=" AND "> AND <noKeyAttId:delimiteur()> = _<noKeyAttId>;
+
+    -- xe be
+    if (upper(_<temporalAtt.id>) is not null) THEN
+        _vbeEquals := upper(_<temporalAtt.id>) = lower(_vbe[1]);
+        _isVxeBeforeEnd := (_vxe) \< upper(_<temporalAtt.id>);
+        --  b1 \< f \< e1
+        _vbeInclude := lower(_vbe[1]) \< upper(_<temporalAtt.id>) and upper(_<temporalAtt.id>) \< upper(_vbe[1]);
+    END IF;
+
+    _vxeEquals := lower(_<temporalAtt.id>) = _vxe;
+    _lowerBeforeVxe := lower(_<temporalAtt.id>) \< _vxe;
+
+    RAISE LOG 'État de db : VXE et VBE';
+    -- Vx
+    IF lower(_<temporalAtt.id>) IS NULL THEN
+        IF upper(_<temporalAtt.id>) IS NULL THEN
+            RAISE NOTICE 'INSERT vxx';
+        ELSE
+            RAISE NOTICE 'INSERT vxe';
+            IF (_vbeInclude) THEN
+                RAISE LOG 'Cas 2.2 x-----e0--b1---f----e1';
+                IF (_vxeAtt) Then
+                    IF (_vbeAtt) then
+                        RAISE LOG 'Cas 2.2.0';
+                        Raise WARNING 'E : redondance sur [saw,e0:%] et [b1:%,f:%]', _vxe, lower(_vbe[1]), upper(_<temporalAtt.id>);
+                    ELSE
+                        RAISE LOG 'Cas 2.2.1';
+                        Raise WARNING 'E1 : redondance sur [saw,e0%]', _vxe;
+                        Raise WARNING 'E2 : contradiction sur [b1:%,f:%]', lower(_vbe[1]), upper(_<temporalAtt.id>);
+                    END IF;
+                ELSE
+                    IF (_vbeAtt) then
+                        RAISE LOG 'Cas 2.2.2';
+                        Raise WARNING 'E1 : redondance sur [b1:%,f:%]', lower(_vbe[1]), upper(_<temporalAtt.id>);
+                        Raise WARNING 'E2 : contradiction sur [saw,e0:%]', _vxe;
+                    ELSE
+                        RAISE LOG 'Cas 2.2.3';
+                        Raise WARNING 'E1 : contradiction sur [saw,e0:%]', _vxe;
+                        Raise WARNING 'E2 : contradiction sur [b1:%,f:%]', lower(_vbe[1]), upper(_<temporalAtt.id>);
+                    END IF;
+                End If;
+            END IF;
+            IF (_isVxeBeforeEnd) and (_vbeEquals) Then
+                RAISE LOG '------e0---fb1-------e1';
+                IF (_vxeAtt) Then
+                    IF (_vbeAtt) then
+                        RAISE LOG 'Case : 2.3.0';
+                        Raise WARNING 'E1 : circonlocution sur [f:%,b1:%]',upper(_<temporalAtt.id>), lower(_vbe[1]);
+                        Raise WARNING 'E2 : redondance sur [saw,e0:%]', _vxe;
+                    ELSE
+                        RAISE LOG 'Case : 2.3.1';
+                        Raise WARNING 'E : redondance sur [saw,e0:%]', _vxe;
+                    END IF;
+                ELSE
+                    IF (_vbeAtt) then
+                        RAISE LOG 'Case : 2.3.2';
+                        Raise WARNING 'E1 : circonlocution sur [f:%,b1:%]',upper(_<temporalAtt.id>), lower(_vbe[1]);
+                        Raise WARNING 'E2 : contradiction sur [saw,e0:%]', _vxe;
+                    ELSE
+                        RAISE LOG 'Case : 2.3.3';
+                        Raise WARNING 'E : contradiction sur [saw,e0:%]', _vxe;
+                    END IF;
+                End If;
+            END IF;
+        END IF;
+        -- Vb
+    ELSE
+        -- vbx
+        IF upper(_<temporalAtt.id>) IS NULL THEN
+            RAISE NOTICE 'INSERT vbx';
+            IF (_lowerBeforeVxe) THEN
+                RAISE LOG 'Cas 2.4 : ----d--e0--b1--------e1';
+                IF (_vxeAtt) Then
+                    IF (_vbeAtt) then
+                        RAISE LOG 'Cas 2.4.0';
+                        RAISE WARNING 'E : redondance sur [d:%,e0:%] et [b1:%,e1:%]', lower(_<temporalAtt.id>), _vxe, lower(_vbe[1]), upper(_vbe[1]);
+                    ELSE
+                        RAISE LOG 'Cas 2.4.1';
+                        RAISE WARNING 'E1 : redondance sur [d:%,e0:%]', lower(_<temporalAtt.id>), _vxe;
+                        RAISE WARNING 'E2 : contradiction sur [b1:%,e1:%]', lower(_vbe[1]), upper(_vbe[1]);
+                    END IF;
+                ELSE
+                    IF (_vbeAtt) then
+                        RAISE LOG 'Cas 2.4.2';
+                        RAISE WARNING 'E1 : redondance sur [b1:%,e1:%]', lower(_vbe[1]), upper(_vbe[1]);
+                        RAISE WARNING 'E2 : contradiction sur [d:%,e0:%]', lower(_<temporalAtt.id>), _vxe;
+                    ELSE
+                        RAISE LOG 'Cas 2.4.3';
+                        RAISE WARNING 'E1 : contradiction sur [d:%,e0:%]', lower(_<temporalAtt.id>), _vxe;
+                        RAISE WARNING 'E2 : contradiction sur [b1:%,e1:%]', lower(_vbe[1]), upper(_vbe[1]);
+                    END IF;
+                END IF;
+            END IF;
+            -- 2.5
+            IF (_vxeEquals) THEN
+                RAISE LOG 'Cas 2.5 : ------e0d--b1--------e1';
+                IF (_vxeAtt) Then
+                    IF (_vbeAtt) then
+                        RAISE LOG 'Cas 2.5.0';
+                        RAISE WARNING 'E1 : circonlocution sur [e0:%,d:%]', _vxe, lower(_<temporalAtt.id>);
+                        RAISE WARNING 'E2 : redondance sur [b1:%,e1:%]', lower(_vbe[1]), upper(_vbe[1]);
+                    ELSE
+                        RAISE LOG 'Cas 2.5.1';
+                        RAISE WARNING 'E1 : circonlocution sur [e0:%,d:%]', _vxe, lower(_<temporalAtt.id>);
+                        RAISE WARNING 'E2 : contradiction sur [b1:%,e1:%]', lower(_vbe[1]), upper(_vbe[1]);
+                    END IF;
+                ELSE
+                    IF (_vbeAtt) then
+                        RAISE LOG 'Cas 2.5.2';
+                        RAISE WARNING 'E : redondance sur [b1:%,e1:%]', lower(_vbe[1]), upper(_vbe[1]);
+                    ELSE
+                        RAISE LOG 'Cas 2.5.3';
+                        RAISE WARNING 'E : contradiction sur [b1:%,e1:%]', lower(_vbe[1]), upper(_vbe[1]);
+                    END IF;
+                END IF;
+            END IF;
+        ELSE
+            RAISE NOTICE 'INSERT vbe';
+            -- case 2.1
+            IF (_vxeEquals and _vbeEquals) THEN
+                RAISE LOG 'Cas 2.1 : ------e0d--fb1-------e1';
+                IF (_vxeAtt) Then
+                    IF (_vbeAtt) then
+                        RAISE LOG 'Cas 2.1.0';
+                        RAISE WARNING 'E : circonlocution sur [e0:%,d:%] et [f:%,b1:%]', _vxe, lower(_<temporalAtt.id>), upper(_<temporalAtt.id>), lower(_vbe[1]);
+                    else
+                        RAISE LOG 'Cas 2.1.1';
+                        RAISE WARNING 'E-1 : circonlocution sur [e0:%,d:%]', _vxe, lower(_<temporalAtt.id>);
+                    END IF;
+                ELSE
+                    IF (_vbeAtt) then
+                        RAISE LOG 'Cas 2.1.2';
+                        RAISE WARNING 'E : circonlocution sur [f:%,b1:%]', upper(_<temporalAtt.id>), lower(_vbe[1]);
+                    else
+                        RAISE LOG 'Cas 2.1.3';
+                        RAISE LOG 'T : ins@be(k, v, [d:%,f:%])', lower(_<temporalAtt.id>), upper(_<temporalAtt.id>);
+                        <insertion_temp(schemaId, vbeRelpartId, attSet, "during" , temporalAtt, "")>
+                    END IF;
+                END IF;
+            END IF;
+            -- case 2.0
+            IF (_lowerBeforeVxe and _vbeInclude) Then
+                RAISE LOG 'Cas 2.0 : x--d---e0--b1---f----e1';
+                IF (_vxeAtt) Then
+                    IF (_vbeAtt) then
+                        RAISE LOG 'Cas 2.0.0';
+                        RAISE WARNING 'E1 : redondance sur [d:%,e0:%]', lower(_<temporalAtt.id>), _vxe;
+                        RAISE WARNING 'E2 : redondance sur [b1:%,f:%]', lower(_vbe[1]), upper(_<temporalAtt.id>);
+                    ELSE
+                        RAISE LOG 'Cas 2.0.1';
+                        RAISE WARNING 'E1 : redondance sur [d:%,e0:%]', lower(_<temporalAtt.id>), _vxe;
+                        RAISE WARNING 'E2 : contradiction sur [b1:%,f:%]', lower(_vbe[1]), upper(_<temporalAtt.id>);
+                    END IF;
+                ELSE
+                    IF (_vbeAtt) then
+                        RAISE LOG 'Cas 2.0.2';
+                        RAISE WARNING 'E1 : redondance sur [b1:%,f:%]', lower(_vbe[1]), upper(_<temporalAtt.id>);
+                        RAISE WARNING 'E2 : contradiction sur [d:%,e0:%]', lower(_<temporalAtt.id>), _vxe;
+                    ELSE
+                        RAISE LOG 'Cas 2.0.3';
+                        RAISE WARNING 'E1 : contradiction sur [d:%,e0:%]', lower(_<temporalAtt.id>), _vxe;
+                        RAISE WARNING 'E2 : contradiction sur [b1:%,f:%]', lower(_vbe[1]), upper(_<temporalAtt.id>);
+                    END IF;
+                END IF;
+            END IF;
+        END IF;
+    END IF;
+
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS err_msg = MESSAGE_TEXT;
+    RAISE EXCEPTION 'Error with insert_<groupingId>_vxe_vbe: %', err_msg;
+  END;
+  $$
+  LANGUAGE 'plpgsql';
+<\n>
+>>
+
+attr_insert_vxe_vbx(schemaId, groupingId, temporalAtt, attSet, keyAttSet, noKeyAttId, vxxRelpartId, vxeRelpartId, vbxRelpartId, vbeRelpartId, temporalPointType, temporalIntervalType) ::=
+<<
+CREATE OR REPLACE PROCEDURE <schemaId:delimiteur()>.insert_<groupingId>_vxe_vbx(<attSet:{a|_<a.id> <if(a.fct)><a.type><else><schemaId:delimiteur()>.<a.type:delimiteur()><endif>}; separator=", ">, _<temporalAtt.id> <schemaId:delimiteur()>.<temporalAtt.type:delimiteur()>, _vxe <temporalPointType>, _vbx <temporalPointType>)
+ AS
+  $$
+  DECLARE
+    err_msg TEXT;
+    _vxeAtt boolean;
+    _vbxAtt boolean;
+    _vxeEquals boolean;
+    _vbxEquals boolean;
+    _vbxBefore  boolean;
+    _vxeAfter  boolean;
+  BEGIN
+
+    SELECT <noKeyAttId:delimiteur()> = _<noKeyAttId> INTO _vxeAtt FROM <vxeRelpartId:delimiteur()> WHERE <keyAttSet:{a|<a.id> = _<a.id>}; separator=" AND "> AND <noKeyAttId:delimiteur()> = _<noKeyAttId>;
+    SELECT <noKeyAttId:delimiteur()> = _<noKeyAttId> INTO _vbxAtt FROM <vbxRelpartId:delimiteur()> WHERE <keyAttSet:{a|<a.id> = _<a.id>}; separator=" AND "> AND <noKeyAttId:delimiteur()> = _<noKeyAttId>;
+
+    _vxeAfter := lower(_<temporalAtt.id>) \< _vxe;
+    _vxeEquals := lower(_<temporalAtt.id>) = _vxe;
+
+    IF (upper(_<temporalAtt.id>) is not null) THEN
+        _vbxBefore :=  _vbx \< upper(_<temporalAtt.id>);
+        _vbxEquals := upper(_<temporalAtt.id>) = _vbx;
+    END IF;
+
+    RAISE LOG 'État de db : VXE et VBX';
+
+    -- Vx
+    IF lower(_<temporalAtt.id>) IS NULL THEN
+      IF upper(_<temporalAtt.id>) IS NULL THEN
+        RAISE NOTICE 'INSERT vxx';
+
+        <if(vxxRelpartId)>
+        <insertion_temp(schemaId, vxxRelpartId, attSet, false , false, "")>
+        <endif>
+      ELSE
+            RAISE NOTICE 'INSERT vxe';
+            -- 3.2
+            IF _vbxBefore THEN
+                RAISE LOG 'Cas 3.2 -------e0----b3--f-----';
+                IF (_vxeAtt) THEN
+                    IF (_vbxAtt) THEN
+                        RAISE LOG 'Cas 3.2.0';
+                        RAISE WARNING 'E : redondance sur [saw,e0:%] et [b3:%,f:%]', _vxe, _vbx, upper(_<temporalAtt.id>);
+                    ELSE
+                        RAISE LOG 'Cas 3.2.1';
+                        RAISE WARNING 'E1 : redondance sur [saw,e0:%]', _vxe;
+                        RAISE WARNING 'E2 : contradiction sur [b3:%,f:%]', _vbx, upper(_<temporalAtt.id>);
+                    END IF;
+                ELSE
+                    IF (_vbxAtt) THEN
+                        RAISE LOG 'Cas 3.2.2';
+                        RAISE WARNING 'E1 : contradiction sur [saw,e0:%]', _vxe;
+                        RAISE WARNING 'E2 : redondance sur [b3:%,f:%]', _vbx, upper(_<temporalAtt.id>);
+                    ELSE
+                        RAISE LOG 'Cas 3.2.3';
+                        RAISE WARNING 'E1 : contradiction sur [saw,e0:%]', _vxe;
+                        RAISE WARNING 'E2 : contradiction sur [b3:%,f:%]', _vbx, upper(_<temporalAtt.id>);
+                    END IF;
+                END IF;
+            END IF;
+            -- 3.3
+            IF (_vbxEquals) THEN
+                RAISE LOG 'Cas 3.3 ------e0-----fb3-------';
+                IF (_vxeAtt) THEN
+                    IF (_vbxAtt) THEN
+                        RAISE LOG 'Cas 3.3.0';
+                        RAISE WARNING 'E1 : redondance sur [saw,e0:%]', _vxe;
+                        RAISE WARNING 'E2 : circonlocution sur [f:%,b3:%]', upper(_<temporalAtt.id>), _vbx;
+                    ELSE
+                        RAISE LOG 'Cas 3.3.1';
+                        RAISE WARNING 'E : redondance sur [saw,e0:%]', _vxe;
+                    END IF;
+                ELSE
+                    IF (_vbxAtt) THEN
+                        RAISE LOG 'Cas 3.3.2';
+                        RAISE WARNING 'E1 : contradiction sur [saw,e0:%]', _vxe;
+                        RAISE WARNING 'E2 : circonlocution sur [f:%,b3:%]', upper(_<temporalAtt.id>), _vbx;
+                    ELSE
+                        RAISE LOG 'Cas 3.3.3';
+                        RAISE WARNING 'E : contradiction sur [saw,e0:%]', _vxe;
+                    END IF;
+                END IF;
+            END IF;
+      END IF;
+    -- Vb
+    ELSE
+        IF upper(_<temporalAtt.id>) IS NULL THEN
+            RAISE NOTICE 'INSERT vbx';
+            -- 3.4
+            IF (_vxeAfter) THEN
+                RAISE LOG 'Cas 3.4 : ----d--e0----b3--------';
+                IF (_vxeAtt) THEN
+                    IF (_vbxAtt) THEN
+                        RAISE LOG 'Cas 3.4.0';
+                        RAISE WARNING 'E : redondance sur [d:%,e0:%] et [b3:%,ufn]', lower(_<temporalAtt.id>), _vxe, _vbx;
+                    ELSE
+                        RAISE LOG 'Cas 3.4.1';
+                        RAISE WARNING 'E1 : redondance sur [d:%,e0:%]', lower(_<temporalAtt.id>), _vxe;
+                        RAISE WARNING 'E2 : contradiction sur [b3:%,ufn]', _vbx;
+                    END IF;
+                ELSE
+                    IF (_vbxAtt) THEN
+                        RAISE LOG 'Cas 3.4.2';
+                        RAISE WARNING 'E1 : contradiction sur [d:%,e0:%]', lower(_<temporalAtt.id>), _vxe;
+                        RAISE WARNING 'E2 : redondance sur [b3:%,ufn]', _vbx;
+                    ELSE
+                        RAISE LOG 'Cas 3.4.3';
+                        RAISE WARNING 'E: contradiction sur [d:%,e0:%] et [b3:%,ufn]', lower(_<temporalAtt.id>), _vxe, _vbx;
+                    END IF;
+                END IF;
+            END IF;
+            -- 3.5
+            IF (_vxeEquals) THEN
+                RAISE LOG 'Cas 3.5 : ------e0d-----b3-------';
+                IF (_vxeAtt) THEN
+                    IF (_vbxAtt) THEN
+                        RAISE LOG 'Cas 3.5.0';
+                        RAISE WARNING 'E1 : redondance sur [b3:%,ufn]', _vbx;
+                        RAISE WARNING 'E2 : circonlocution sur [e0:%,d:%]', _vxe, lower(_<temporalAtt.id>);
+                    ELSE
+                        RAISE LOG 'Cas 3.5.1';
+                        RAISE WARNING 'E1 : contradiction sur [b3:%,ufn]', _vbx;
+                        RAISE WARNING 'E2 : circonlocution sur [e0:%,d:%]', _vxe, lower(_<temporalAtt.id>);
+                    END IF;
+                ELSE
+                    IF (_vbxAtt) THEN
+                        RAISE LOG 'Cas 3.5.2';
+                        RAISE WARNING 'E : redondance sur [b3:%,ufn]', _vbx;
+                    ELSE
+                        RAISE LOG 'Cas 3.5.3';
+                        RAISE WARNING 'E : contradiction sur [b3:%,ufn]', _vbx;
+                    END IF;
+                END IF;
+            END IF;
+        ELSE
+            RAISE NOTICE 'INSERT vbe';
+            -- 3.0
+            IF (_vxeAfter and _vbxBefore) THEN
+                RAISE LOG 'Cas 3.0 : ----d--e0----b3--f-----';
+                IF (_vxeAtt) THEN
+                    IF (_vbxAtt) THEN
+                        RAISE LOG 'Cas 3.0.0';
+                        RAISE WARNING 'E1 : redondance sur [d:%,e0:%]', lower(_<temporalAtt.id>), _vxe;
+                        RAISE WARNING 'E2 : redondance sur [b3:%,f:%]', _vbx, upper(_<temporalAtt.id>);
+                    ELSE
+                        RAISE LOG 'Cas 3.0.1';
+                        RAISE WARNING 'E1 : redondance sur [d:%,e0:%]', lower(_<temporalAtt.id>), _vxe;
+                        RAISE WARNING 'E2 : contradiction sur [b3:%,f:%]', _vbx, upper(_<temporalAtt.id>);
+                    END IF;
+                ELSE
+                    IF (_vbxAtt) THEN
+                        RAISE LOG 'Cas 3.0.2';
+                        RAISE WARNING 'E1 : contradiction sur [d:%,e0:%]', lower(_<temporalAtt.id>), _vxe;
+                        RAISE WARNING 'E2 : redondance sur [b3:%,f:%]', _vbx, upper(_<temporalAtt.id>);
+                    ELSE
+                        RAISE LOG 'Cas 3.0.3';
+                        RAISE WARNING 'E1 : contradiction sur [d:%,e0:%]', lower(_<temporalAtt.id>), _vxe;
+                        RAISE WARNING 'E2 : contradiction sur [b3:%,f:%]', _vbx, upper(_<temporalAtt.id>);
+                    END IF;
+                END IF;
+            END IF;
+            -- 3.1
+            IF (_vxeEquals and _vbxEquals) THEN
+                RAISE LOG 'Cas 3.1 : ------e0d----fb3-------';
+                IF (_vxeAtt) THEN
+                    IF (_vbxAtt) THEN
+                        RAISE LOG 'Cas 3.1.0';
+                        RAISE WARNING 'E1 : circonlocution sur [e0:%,d:%]', _vxe, lower(_<temporalAtt.id>);
+                        RAISE WARNING 'E2 : circonlocution sur [f:%,b3:%]', upper(_<temporalAtt.id>), _vbx;
+                    ELSE
+                        RAISE LOG 'Cas 3.1.1';
+                        RAISE WARNING 'E : circonlocution sur [e0:%,d:%]', _vxe, lower(_<temporalAtt.id>);
+                    END IF;
+                ELSE
+                    IF (_vbxAtt) THEN
+                        RAISE LOG 'Cas 3.1.2';
+                        RAISE WARNING 'E : circonlocution sur [f:%,b3:%]', upper(_<temporalAtt.id>), _vbx;
+                    ELSE
+                        RAISE LOG 'Cas 3.1.3';
+                        RAISE WARNING 'T: ins@be(k, v, [d:%,f:%])', lower(_<temporalAtt.id>), upper(_<temporalAtt.id>);
+                        <insertion_temp(schemaId, vbeRelpartId, attSet, "during", temporalAtt, "")>
+                    END IF;
+                END IF;
+            END IF;
+        END IF;
+    END IF;
+
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS err_msg = MESSAGE_TEXT;
+    RAISE EXCEPTION 'Error with insert_<groupingId>_vxe_vbe: %', err_msg;
+  END;
+  $$
+  LANGUAGE 'plpgsql';
+<\n>
+>>
+
+attr_insert_vbe(schemaId, groupingId, temporalAtt, attSet, keyAttSet, noKeyAttId, vxxRelpartId, vxeRelpartId, vbxRelpartId, vbeRelpartId, temporalPointType, temporalIntervalType) ::=
+<<
+CREATE OR REPLACE PROCEDURE <schemaId:delimiteur()>.insert_<groupingId>_vbe(<attSet:{a|_<a.id> <if(a.fct)><a.type><else><schemaId:delimiteur()>.<a.type:delimiteur()><endif>}; separator=", ">, _<temporalAtt.id> <schemaId:delimiteur()>.<temporalAtt.type:delimiteur()>, _vbe <temporalIntervalType>[])
+ AS
+  $$
+  DECLARE
+    err_msg TEXT;
+    _vbeAtt boolean;
+  BEGIN
+
+    SELECT <noKeyAttId:delimiteur()> = _<noKeyAttId> INTO _vbeAtt FROM <vbeRelpartId:delimiteur()> WHERE <keyAttSet:{a|<a.id> = _<a.id>}; separator=" AND "> AND <noKeyAttId:delimiteur()> = _<noKeyAttId>;
+
+    RAISE LOG 'État de db : VBE';
+
+    IF lower(_<temporalAtt.id>) IS NULL THEN
+      IF upper(_<temporalAtt.id>) IS NULL THEN
+        RAISE NOTICE 'INSERT vxx';
+
+        <if(vxxRelpartId)>
+            <insertion_temp(schemaId, vxxRelpartId, attSet, false, false, "")>
+        <endif>
+      ELSE
+          RAISE NOTICE 'INSERT vxe';
+
+          -- 4.6  f \< e1
+          IF upper(_<temporalAtt.id>) > lower(_vbe[1]) and upper(_<temporalAtt.id>) \< upper(_vbe[1]) THEN
+              RAISE LOG 'Cas 4.6 : ----b1--------f--e1----';
+              IF (_vbeAtt) THEN
+                  RAISE LOG 'Cas 4.6.0';
+                  RAISE WARNING 'E : redondance sur [b1:%,f:%]', lower(_vbe[1]), upper(_<temporalAtt.id>);
+              ELSE
+                  RAISE LOG 'Cas 4.6.1';
+                  RAISE WARNING 'E : contradiction sur [b1:%,f:%]', lower(_vbe[1]), upper(_<temporalAtt.id>);
+              END IF;
+          END IF;
+          -- 4.7  f > e1
+          IF upper(_<temporalAtt.id>) > upper(_vbe[1]) THEN
+              RAISE LOG 'Cas 4.7 : -------b1------e1--f--';
+              IF (_vbeAtt) THEN
+                  RAISE LOG 'Cas 4.7.0';
+                  RAISE WARNING 'E : redondance sur [b1:%,e1:%]', lower(_vbe[1]), upper(_vbe[1]);
+              ELSE
+                  RAISE LOG 'Cas 4.7.1';
+                  RAISE WARNING 'E : contradiction sur [b1:%,e1:%]', lower(_vbe[1]), upper(_vbe[1]);
+              END IF;
+          END IF;
+          -- 4.8  f = b1
+          IF upper(_<temporalAtt.id>) = lower(_vbe[1]) THEN
+              RAISE LOG 'Cas 4.8 : -----fb1-------e1------';
+              IF (_vbeAtt) THEN
+                  RAISE LOG 'Cas 4.8.0';
+                  RAISE WARNING 'E : circonlocution sur [f:%,b1:%]', upper(_<temporalAtt.id>), lower(_vbe[1]);
+              ELSE
+                  RAISE LOG 'Cas 4.8.1';
+                  RAISE WARNING 'T : ins@xe(k, v, [saw,f:%])', upper(_<temporalAtt.id>);
+                  <insertion_temp(schemaId, vxeRelpartId, attSet, "until", temporalAtt, "upper")>
+              END IF;
+          END IF;
+      END IF;
+      -- Vb
+  ELSE
+      -- vbx
+      IF upper(_<temporalAtt.id>) IS NULL THEN
+          RAISE NOTICE 'INSERT vbx';
+
+          -- 4.9  d > b1 and d \< e1
+          IF lower(_<temporalAtt.id>) > lower(_vbe[1]) and lower(_<temporalAtt.id>) \< upper(_vbe[1]) THEN
+              RAISE LOG 'Cas 4.9 : ----b1----d------e1----';
+              IF (_vbeAtt) THEN
+                  RAISE LOG 'Cas 4.9.0';
+                  RAISE WARNING 'E : redondance sur [d:%,e1:%]', lower(_<temporalAtt.id>), upper(_vbe[1]);
+              ELSE
+                  RAISE LOG 'Cas 4.9.1';
+                  RAISE WARNING 'E : contradiction sur [d:%,e1:%]', lower(_<temporalAtt.id>), upper(_vbe[1]);
+              END IF;
+          END IF;
+          -- 4.10  d \< b1
+          IF lower(_<temporalAtt.id>) \< lower(_vbe[1]) THEN
+              RAISE LOG 'Cas 4.10 : ---d--b1---------e1----';
+              IF (_vbeAtt) THEN
+                  RAISE LOG 'Cas 4.10.0';
+                  RAISE WARNING 'E : redondance sur [b1:%,e1:%]', lower(_vbe[1]), upper(_vbe[1]);
+              ELSE
+                  RAISE LOG 'Cas 4.10.1';
+                  RAISE WARNING 'E : contradiction sur [b1:%,e1:%]', lower(_vbe[1]), upper(_vbe[1]);
+              END IF;
+          END IF;
+          -- 4.11  d = e1
+          IF lower(_<temporalAtt.id>) = upper(_vbe[1]) THEN
+              RAISE LOG 'Cas 4.11 : ------b1-------e1d-----';
+              IF (_vbeAtt) THEN
+                  RAISE LOG 'Cas 4.11.0';
+                  RAISE WARNING 'E : circonlocution sur [e1:%,d:%]', upper(_vbe[1]), lower(_<temporalAtt.id>);
+              ELSE
+                  RAISE LOG 'Cas 4.11.1';
+                  RAISE WARNING 'T : ins@bx(k, v, [d:%,ufn])', lower(_<temporalAtt.id>);
+                  <insertion_temp(schemaId, vbxRelpartId, attSet, "since", temporalAtt, "lower")>
+              END IF;
+          END IF;
+      ELSE
+          RAISE NOTICE 'INSERT vbe';
+          --4.0
+          IF lower(_vbe[1]) \< lower(_<temporalAtt.id>) and upper(_vbe[1]) > upper(_<temporalAtt.id>) THEN
+              RAISE LOG 'Cas 4.0 : ----b1----d---f--e1----';
+              IF (_vbeAtt) THEN
+                  RAISE LOG 'Cas 4.0.0';
+                  RAISE WARNING 'E : redondance sur [d:%,f:%]', lower(_<temporalAtt.id>), upper(_<temporalAtt.id>);
+              ELSE
+                  RAISE LOG 'Cas 4.0.1';
+                  RAISE WARNING 'E : contradiction sur [d:%,f:%]', lower(_<temporalAtt.id>), upper(_<temporalAtt.id>);
+              END IF;
+          END IF;
+          --4.1
+          IF lower(_vbe[1]) > lower(_<temporalAtt.id>) AND upper(_vbe[1]) > upper(_<temporalAtt.id>) and
+             lower(_vbe[1]) \<> upper(_<temporalAtt.id>) THEN
+              RAISE LOG 'Cas 4.1 : ---d--b1------f--e1----';
+              IF (_vbeAtt) THEN
+                  RAISE LOG 'Cas 4.1.0';
+                  RAISE WARNING 'E : redondance sur [b1:%,f:%]', lower(_vbe[1]), upper(_<temporalAtt.id>);
+              ELSE
+                  RAISE LOG 'Cas 4.1.1';
+                  RAISE WARNING 'E : contradiction sur [b1:%,f:%]', lower(_vbe[1]), upper(_<temporalAtt.id>);
+              END IF;
+          END IF;
+          --4.2
+          IF lower(_vbe[1]) \< lower(_<temporalAtt.id>) and upper(_vbe[1]) \< upper(_<temporalAtt.id>) and
+             upper(_vbe[1]) \<> lower(_<temporalAtt.id>) THEN
+              RAISE LOG 'Cas 4.2 : -------b1--d----e1--f--';
+              IF (_vbeAtt) THEN
+                  RAISE LOG 'Cas 4.2.0';
+                  RAISE WARNING 'E : redondance sur [d:%,e1:%]', lower(_<temporalAtt.id>), upper(_vbe[1]);
+              ELSE
+                  RAISE LOG 'Cas 4.2.1';
+                  RAISE WARNING 'E : contradiction sur [d:%,e1:%]', lower(_<temporalAtt.id>), upper(_vbe[1]);
+              END IF;
+          END IF;
+          --4.3
+          IF lower(_vbe[1]) = upper(_<temporalAtt.id>) THEN
+              RAISE LOG 'Cas 4.3 : --d---fb1-------e1----';
+              IF (_vbeAtt) THEN
+                  RAISE LOG 'Cas 4.3.0';
+                  RAISE WARNING 'E : circonlocution sur [f:%,b1:%]', upper(_<temporalAtt.id>), lower(_vbe[1]);
+              ELSE
+                  RAISE LOG 'Cas 4.3.1';
+                  RAISE WARNING 'T : ins@be(k, v, [d:%,f:%])', lower(_<temporalAtt.id>), upper(_<temporalAtt.id>);
+                  <insertion_temp(schemaId, vbeRelpartId, attSet, "during", temporalAtt, "")>
+              END IF;
+          END IF;
+          --4.4
+          IF upper(_vbe[1]) = lower(_<temporalAtt.id>) THEN
+              RAISE LOG 'Cas 4.4 : ------b1-------e1d---f-';
+              IF (_vbeAtt) THEN
+                  RAISE LOG 'Cas 4.4.0';
+                  RAISE WARNING 'E : circonlocution sur [e1:%,d:%]', upper(_vbe[1]), lower(_<temporalAtt.id>);
+              ELSE
+                  RAISE LOG 'Cas 4.4.1';
+                  RAISE WARNING 'T : ins@be(k, v, [d:%,f:%])', lower(_<temporalAtt.id>), upper(_<temporalAtt.id>);
+                  <insertion_temp(schemaId, vbeRelpartId, attSet, "during", temporalAtt, "")>
+              END IF;
+          END IF;
+          -- 4.5 : b1 > d and e1 \< f and b1 !- f and e1 != d
+          IF lower(_vbe[1]) > lower(_<temporalAtt.id>) AND upper(_vbe[1]) \< upper(_<temporalAtt.id>)
+              and lower(_vbe[1]) \<> upper(_<temporalAtt.id>) and upper(_vbe[1]) \<> lower(_<temporalAtt.id>)
+          THEN
+              RAISE LOG 'Cas 4.5 : ---d--b1---------e1--f-';
+              IF (_vbeAtt) THEN
+                  RAISE LOG 'Cas 4.5.0';
+                  RAISE WARNING 'E : redondance sur [b1:%,e1:%]', lower(_vbe[1]), upper(_vbe[1]);
+              ELSE
+                  RAISE LOG 'Cas 4.5.1';
+                  RAISE WARNING 'E : contradiction sur [b1:%,e1:%]', lower(_vbe[1]), upper(_vbe[1]);
+              END IF;
+          END IF;
+      END IF;
+  END IF;
+
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS err_msg = MESSAGE_TEXT;
+    RAISE EXCEPTION 'Error with insert_<groupingId>_vbe: %', err_msg;
+  END;
+  $$
+  LANGUAGE 'plpgsql';
+<\n>
+>>
+
+attr_insert_vbe_vbe(schemaId, groupingId, temporalAtt, attSet, keyAttSet, noKeyAttId, vxxRelpartId, vxeRelpartId, vbxRelpartId, vbeRelpartId, temporalPointType, temporalIntervalType) ::=
+<<
+CREATE OR REPLACE PROCEDURE <schemaId:delimiteur()>.insert_<groupingId>_vbe_vbe(<attSet:{a|_<a.id> <if(a.fct)><a.type><else><schemaId:delimiteur()>.<a.type:delimiteur()><endif>}; separator=", ">, _<temporalAtt.id> <schemaId:delimiteur()>.<temporalAtt.type:delimiteur()>, _vbe <temporalIntervalType>[])
+ AS
+  $$
+  DECLARE
+    err_msg TEXT;
+    _vbeAtt1 boolean;
+    _vbeAtt2 boolean;
+  BEGIN
+
+    select <noKeyAttId:delimiteur()> = _<noKeyAttId> into _vbeAtt1 from <vbeRelpartId:delimiteur()> where <keyAttSet:{a|<a.id> = _<a.id>}; separator=" AND "> and during = _vbe[1];
+    select <noKeyAttId:delimiteur()> = _<noKeyAttId> into _vbeAtt2 from <vbeRelpartId:delimiteur()> where <keyAttSet:{a|<a.id> = _<a.id>}; separator=" AND "> and during = _vbe[2];
+
+    RAISE LOG 'État de db : VBE VBE';
+
+    IF lower(_<temporalAtt.id>) IS NOT NULL THEN
+           -- vbx
+           IF upper(_<temporalAtt.id>) IS NOT NULL THEN
+               RAISE NOTICE 'INSERT vbe';
+               -- 5.0  b1 @> d  et b2 @> f
+               IF _vbe[1] @> lower(_<temporalAtt.id>) and _vbe[2] @> upper(_<temporalAtt.id>)
+                   and lower(_<temporalAtt.id>) \<> upper(_vbe[1]) and upper(_<temporalAtt.id>) \<> lower(_vbe[2])
+               THEN
+                   RAISE LOG 'Cas 5.0 : -b1--d--e1--b2--f--e2-';
+                   IF (_vbeAtt1) THEN
+                       IF (_vbeAtt2) THEN
+                           RAISE LOG 'Cas 5.0.0';
+                           RAISE WARNING 'E : redondance sur [d:%,e1:%] et [b2:%,f:%]', lower(_<temporalAtt.id>), upper(_vbe[1]), lower(_vbe[2]), upper(_<temporalAtt.id>);
+                       ELSE
+                           RAISE LOG 'Cas 5.0.1';
+                           RAISE WARNING 'E1 : redondance sur [d:%,e1:%]', lower(_<temporalAtt.id>), upper(_vbe[1]);
+                           RAISE WARNING 'E2 : contradiction sur [b2:%,f:%]', lower(_vbe[2]), upper(_<temporalAtt.id>);
+                       END IF;
+                   ELSE
+                       IF (_vbeAtt2) THEN
+                           RAISE LOG 'Cas 5.0.2';
+                           RAISE WARNING 'E1 : contradiction sur [d:%,e1:%]', lower(_<temporalAtt.id>), upper(_vbe[1]);
+                           RAISE WARNING 'E2 : redondance sur [b2:%,f:%]', lower(_vbe[2]), upper(_<temporalAtt.id>);
+                       ELSE
+                           RAISE LOG 'Cas 5.0.3';
+                           RAISE WARNING 'E : contradiction sur [d:%,e1:%] et [b2:%,f:%]', lower(_<temporalAtt.id>), upper(_vbe[1]), lower(_vbe[2]), upper(_<temporalAtt.id>);
+                       END IF;
+                   END IF;
+               END IF;
+
+               -- 5.1 e1 = d et f = b2
+               IF lower(_<temporalAtt.id>) = upper(_vbe[1]) and upper(_<temporalAtt.id>) = lower(_vbe[2])
+               THEN
+                   RAISE LOG 'Cas 5.1 : -b1----e1d---fb2---e2-';
+                   IF (_vbeAtt1) THEN
+                       IF (_vbeAtt2) THEN
+                           RAISE LOG 'Cas 5.1.0';
+                           RAISE WARNING 'E : circonlocution sur [e1:%,d:%] et [f:%,b2:%]', upper(_vbe[1]), lower(_<temporalAtt.id>), upper(_<temporalAtt.id>), lower(_vbe[2]);
+                       ELSE
+                           RAISE LOG 'Cas 5.1.1';
+                           RAISE WARNING 'E : circonlocution sur [e1:%,d:%]', upper(_vbe[1]), lower(_<temporalAtt.id>);
+                       END IF;
+                   ELSE
+                       IF (_vbeAtt2) THEN
+                           RAISE LOG 'Cas 5.1.2';
+                           RAISE WARNING 'E : circonlocution sur [f:%,b2:%]', upper(_<temporalAtt.id>), lower(_vbe[2]);
+                       ELSE
+                           RAISE LOG 'Cas 5.1.3';
+                           RAISE WARNING 'T : ins@be(k, v, [d:%,f:%])',lower(_<temporalAtt.id>), upper(_<temporalAtt.id>);
+                           <insertion_temp(schemaId, vbeRelpartId, attSet, "during", temporalAtt, "")>
+                       END IF;
+                   END IF;
+               END IF;
+           END IF;
+       END IF;
+
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS err_msg = MESSAGE_TEXT;
+    RAISE EXCEPTION 'Error with insert_<groupingId>_vbe_vbe: %', err_msg;
+  END;
+  $$
+  LANGUAGE 'plpgsql';
+<\n>
+>>
+
+attr_insert_vbe_vbx(schemaId, groupingId, temporalAtt, attSet, keyAttSet, noKeyAttId, vxxRelpartId, vxeRelpartId, vbxRelpartId, vbeRelpartId, temporalPointType, temporalIntervalType) ::=
+<<
+CREATE OR REPLACE PROCEDURE <schemaId:delimiteur()>.insert_<groupingId>_vbe_vbx(<attSet:{a|_<a.id> <if(a.fct)><a.type><else><schemaId:delimiteur()>.<a.type:delimiteur()><endif>}; separator=", ">, _<temporalAtt.id> <schemaId:delimiteur()>.<temporalAtt.type:delimiteur()>, _vbe <temporalIntervalType>[], _vbx <temporalPointType>)
+ AS
+  $$
+  DECLARE
+    err_msg TEXT;
+    _vbeAtt boolean;
+    _vbxAtt boolean;
+  BEGIN
+    select <noKeyAttId:delimiteur()> = _<noKeyAttId> into _vbeAtt from <vbeRelpartId:delimiteur()> where <keyAttSet:{a|<a.id> = _<a.id>}; separator=" AND "> and during = _vbe[1];
+    select <noKeyAttId:delimiteur()> = _<noKeyAttId> into _vbxAtt from <vbxRelpartId:delimiteur()> where <keyAttSet:{a|<a.id> = _<a.id>}; separator=" AND "> and since = _vbx;
+
+    RAISE LOG 'État de db : VBE VBX';
+    IF lower(_<temporalAtt.id>) IS NOT NULL THEN
+        IF upper(_<temporalAtt.id>) IS NOT NULL THEN
+            RAISE NOTICE 'INSERT vbe';
+            -- e1 != d
+            IF upper(_vbe[1]) \<> lower(_<temporalAtt.id>) THEN
+                -- [b1, e1] contains d
+                IF _vbe[1] @> lower(_<temporalAtt.id>) THEN
+                    -- 6.0  b1 \< d \< e1 et b3 \< f
+                    IF _vbx \< upper(_<temporalAtt.id>) THEN
+                        RAISE LOG 'Cas 6.0 : -b1--d--e1----b3---f---';
+                        IF (_vbeAtt) THEN
+                            IF (_vbxAtt) THEN
+                                RAISE LOG 'Cas 6.0.0';
+                                RAISE WARNING 'E : redondance sur [d:%,e1:%] et [b3:%,f:%]', lower(_<temporalAtt.id>), upper(_vbe[1]), _vbx, upper(_<temporalAtt.id>);
+                            ELSE
+                                RAISE LOG 'Cas 6.0.1';
+                                RAISE WARNING 'E1 : redondance sur [d:%,e1:%]', lower(_<temporalAtt.id>), upper(_vbe[1]);
+                                RAISE WARNING 'E2 : contradiction sur [b3:%,f:%]', _vbx, upper(_<temporalAtt.id>);
+                            END IF;
+                        ELSE
+                            IF (_vbxAtt) THEN
+                                RAISE LOG 'Cas 6.0.2';
+                                RAISE WARNING 'E1 : contradiction sur [d:%,e1:%]', lower(_<temporalAtt.id>), upper(_vbe[1]);
+                                RAISE WARNING 'E2 : redondance sur [b3:%,f:%]', _vbx, upper(_<temporalAtt.id>);
+                            ELSE
+                                RAISE LOG 'Cas 6.0.3';
+                                RAISE WARNING 'E1 : contradiction sur [d:%,e1:%]', lower(_<temporalAtt.id>), upper(_vbe[1]);
+                                RAISE WARNING 'E2 : contradiction sur [b3:%,f:%]', _vbx, upper(_<temporalAtt.id>);
+                            END IF;
+                        END IF;
+                    END IF;
+                    -- 6.1
+                    IF _vbx = upper(_<temporalAtt.id>) THEN
+                        RAISE LOG 'Cas 6.1 : -b1--d--e1----fb3------';
+                        IF (_vbeAtt) THEN
+                            IF (_vbxAtt) THEN
+                                RAISE LOG 'Cas 6.1.0';
+                                RAISE WARNING 'E : redondance sur [d:%,e1:%]', lower(_<temporalAtt.id>), upper(_vbe[1]);
+                            ELSE
+                                RAISE LOG 'Cas 6.1.1';
+                                RAISE WARNING 'E : redondance sur [d:%,e1:%]', lower(_<temporalAtt.id>), upper(_vbe[1]);
+                            END IF;
+                        ELSE
+                            IF (_vbxAtt) THEN
+                                RAISE LOG 'Cas 6.1.2';
+                                RAISE WARNING 'E1 : contradiction sur [d:%,e1:%]', lower(_<temporalAtt.id>), upper(_vbe[1]);
+                                RAISE WARNING 'E2 : circonlocution sur [b3:%,f:%]', _vbx, upper(_<temporalAtt.id>);
+                            ELSE
+                                RAISE LOG 'Cas 6.1.3';
+                                RAISE WARNING 'E : contradiction sur [d:%,e1:%]', lower(_<temporalAtt.id>), upper(_vbe[1]);
+                            END IF;
+                        END IF;
+                    END IF;
+                END IF;
+                -- e1 == d
+            ELSE
+                -- 6.2  b3 \< f
+                IF _vbx \< upper(_<temporalAtt.id>) THEN
+                    RAISE LOG 'Cas 6.2 : -b1----e1d---b3---f----';
+                    IF (_vbeAtt) THEN
+                        IF (_vbxAtt) THEN
+                            RAISE LOG 'Cas 6.2.0';
+                            RAISE WARNING 'E : redondance sur [b3:%,f:%]', _vbx, upper(_<temporalAtt.id>);
+                        ELSE
+                            RAISE LOG 'Cas 6.2.1';
+                            RAISE WARNING 'E1 : circonlocution sur [e1:%,d:%]', upper(_vbe[1]), lower(_<temporalAtt.id>);
+                            RAISE WARNING 'E2 : contradiction sur [b3:%,f:%]', _vbx, upper(_<temporalAtt.id>);
+                        END IF;
+                    ELSE
+                        IF (_vbxAtt) THEN
+                            RAISE LOG 'Cas 6.2.2';
+                            RAISE WARNING 'E1 : redondance sur [b3:%,f:%]', _vbx, upper(_<temporalAtt.id>);
+                        ELSE
+                            RAISE LOG 'Cas 6.2.3';
+                            RAISE WARNING 'E1 : contradiction sur [b3:%,f:%]', _vbx, upper(_<temporalAtt.id>);
+                        END IF;
+                    END IF;
+                END IF;
+                -- 6.3  b3 = f
+                IF _vbx = upper(_<temporalAtt.id>) THEN
+                    RAISE LOG 'Cas 6.3 : -b1----e1d---fb3-------';
+                    IF (_vbeAtt) THEN
+                        IF (_vbxAtt) THEN
+                            RAISE LOG 'Cas 6.3.0';
+                            RAISE WARNING 'E : circonlocution sur [e1:%,d:%] et [f:%,b3:%]', upper(_vbe[1]), lower(_<temporalAtt.id>), upper(_<temporalAtt.id>), _vbx;
+                        ELSE
+                            RAISE LOG 'Cas 6.3.1';
+                            RAISE WARNING 'E : circonlocution sur [e1:%,d:%]', upper(_vbe[1]), lower(_<temporalAtt.id>);
+                        END IF;
+                    ELSE
+                        IF (_vbxAtt) THEN
+                            RAISE LOG 'Cas 6.3.2';
+                            RAISE WARNING 'E2 : circonlocution sur [f:%,b3:%]', upper(_<temporalAtt.id>), _vbx;
+                        ELSE
+                            RAISE LOG 'Cas 6.3.3';
+                            RAISE LOG 'T : ins@be(k, v, [d:%,f:%])', lower(_<temporalAtt.id>), upper(_<temporalAtt.id>);
+                            <insertion_temp(schemaId, vbeRelpartId, attSet, "during", temporalAtt, "")>
+                        END IF;
+                    END IF;
+                END IF;
+            end if;
+        END IF;
+    END IF;
+
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS err_msg = MESSAGE_TEXT;
+    RAISE EXCEPTION 'Error with insert_<groupingId>_vbe_vbx: %', err_msg;
+  END;
+  $$
+  LANGUAGE 'plpgsql';
+<\n>
+>>
+
+
+attr_insert_vbx(schemaId, groupingId, temporalAtt, attSet, keyAttSet, noKeyAttId, vxxRelpartId, vxeRelpartId, vbxRelpartId, vbeRelpartId, temporalPointType, temporalIntervalType) ::=
+<<
+CREATE OR REPLACE PROCEDURE <schemaId:delimiteur()>.insert_<groupingId>_vbx(<attSet:{a|_<a.id> <if(a.fct)><a.type><else><schemaId:delimiteur()>.<a.type:delimiteur()><endif>}; separator=", ">, _<temporalAtt.id> <schemaId:delimiteur()>.<temporalAtt.type:delimiteur()>, _vbx <temporalPointType>)
+ AS
+  $$
+  DECLARE
+    err_msg TEXT;
+    _vbxAtt boolean;
+  BEGIN
+    SELECT <noKeyAttId:delimiteur()> = _<noKeyAttId> INTO _vbxAtt FROM <vbxRelpartId:delimiteur()> WHERE <keyAttSet:{a|<a.id> = _<a.id>}; separator=" AND "> AND since = _vbx;
+
+    RAISE LOG 'État de db : VBX';
+    IF lower(_<temporalAtt.id>) IS NULL THEN
+        IF upper(_<temporalAtt.id>) IS NULL THEN
+            RAISE NOTICE 'INSERT vxx';
+            <if(vxxRelpartId)>
+            <insertion_temp(schemaId, vxxRelpartId, attSet, false, false, "")>
+            <endif>
+        ELSE
+            RAISE NOTICE 'INSERT vxe';
+            -- 7.4 b \< f
+            IF _vbx \< upper(_<temporalAtt.id>) THEN
+                RAISE LOG 'Cas 7.4 : -----------b-------f---';
+                IF (_vbxAtt) THEN
+                    RAISE LOG 'Cas 7.4.0';
+                    RAISE WARNING 'E : redondance (clé) sur [b:%,f:%]', _vbx, upper(_<temporalAtt.id>);
+                ELSE
+                    RAISE LOG 'Cas 7.4.1';
+                    RAISE WARNING 'E : contradiction sur [b:%,f:%]', _vbx, upper(_<temporalAtt.id>);
+                END IF;
+            END IF;
+            -- 7.7  b > f
+            IF _vbx > upper(_<temporalAtt.id>) THEN
+                RAISE LOG 'Cas 7.7 : ---------f---b----------';
+                RAISE WARNING 'T : ins@xe(k, v, [saw,f:%])', upper(_<temporalAtt.id>);
+                <insertion_temp(schemaId, vxeRelpartId, attSet, "until", temporalAtt, "upper")>
+            END IF;
+            -- 7.6  b = f
+            IF _vbx = upper(_<temporalAtt.id>) THEN
+                RAISE LOG 'Cas 7.6 : ----------fb:%------------', _vbx;
+                RAISE LOG 'Cas 7.6.0';
+                RAISE EXCEPTION 'IMPOSSIBLE';
+            END IF;
+        END IF;
+    ELSE
+        IF upper(_<temporalAtt.id>) IS NULL THEN
+            RAISE NOTICE 'INSERT vbx';
+            -- 7.8 b \< d
+            IF _vbx \< lower(_<temporalAtt.id>) THEN
+                RAISE LOG '-----------b--d--------';
+                IF (_vbxAtt) THEN
+                    RAISE LOG 'Cas 7.8.0';
+                    RAISE WARNING 'E : redondance (clé) sur [d:%,ufn]', lower(_<temporalAtt.id>);
+                ELSE
+                    RAISE LOG 'Cas 7.8.1';
+                    RAISE WARNING 'E : contradiction sur [d:%,ufn]', lower(_<temporalAtt.id>);
+                END IF;
+            -- 7.9 b > d
+            ELSE
+                RAISE LOG '----d-----b------------';
+                IF (_vbxAtt) THEN
+                    RAISE LOG 'Cas 7.9.0';
+                    RAISE WARNING 'E : redondance (clé) sur [b:%,ufn]', _vbx;
+                ELSE
+                    RAISE LOG 'Cas 7.9.1';
+                    RAISE WARNING 'E : contradiction sur [b:%,ufn]', _vbx;
+                END IF;
+            END IF;
+        ELSE
+            RAISE NOTICE 'INSERT vbe';
+            -- 7.0
+            IF _vbx \< lower(_<temporalAtt.id>) and _vbx \< upper(_<temporalAtt.id>) THEN
+                RAISE LOG 'Cas 7.0 : -----------b--d----f---';
+                IF (_vbxAtt) THEN
+                    RAISE LOG 'Cas 7.0.0';
+                    RAISE WARNING 'E : redondance (clé) sur [d:%,f:%]', lower(_<temporalAtt.id>), upper(_<temporalAtt.id>);
+                ELSE
+                    RAISE LOG 'Cas 7.0.1';
+                    RAISE WARNING 'E : contradiction sur [d:%,f:%]', lower(_<temporalAtt.id>), upper(_<temporalAtt.id>);
+                END IF;
+            END IF;
+            -- b > d
+            IF _vbx > lower(_<temporalAtt.id>) THEN
+                --7.1  b \< f
+                IF _vbx \< upper(_<temporalAtt.id>) THEN
+                    RAISE LOG 'Cas 7.1 : ----d-----b-----f------';
+                    IF (_vbxAtt) THEN
+                        RAISE LOG 'Cas 7.1.0';
+                        RAISE WARNING 'E : redondance (clé) sur [b:%,f:%]', _vbx, upper(_<temporalAtt.id>);
+                    ELSE
+                        RAISE LOG 'Cas 7.1.1';
+                        RAISE WARNING 'E : contradiction sur [b:%,f:%]', _vbx, upper(_<temporalAtt.id>);
+                    END IF;
+                END IF;
+                --7.2  b = f
+                IF _vbx = upper(_<temporalAtt.id>) THEN
+                    RAISE LOG 'Cas 7.2 : ----d----fb------------';
+                    IF (_vbxAtt) THEN
+                        RAISE LOG 'Cas 7.2.0';
+                        RAISE WARNING 'E : circonlocution sur [f:%,b:%]', upper(_<temporalAtt.id>), _vbx;
+                    ELSE
+                        RAISE LOG 'Cas 7.2.1';
+                        RAISE LOG 'T : ins@be(k, v, [%,%])', lower(_<temporalAtt.id>), upper(_<temporalAtt.id>);
+                        <insertion_temp(schemaId, vbeRelpartId, attSet, "during", temporalAtt, "")>
+                    END IF;
+                END IF;
+                -- 7.3  b > f
+                IF _vbx > upper(_<temporalAtt.id>) THEN
+                    RAISE LOG 'Cas 7.3 : ---d----f---b----------';
+                    RAISE LOG 'T : ins@be(k, v, [%,%])', lower(_<temporalAtt.id>), upper(_<temporalAtt.id>);
+                    <insertion_temp(schemaId, vbeRelpartId, attSet, "during", temporalAtt, "")>
+                END IF;
+            END IF;
+        END IF;
+    END IF;
+
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS err_msg = MESSAGE_TEXT;
+    RAISE EXCEPTION 'Error with insert_<groupingId>_vbx: %', err_msg;
+  END;
+  $$
+  LANGUAGE 'plpgsql';
+<\n>
+>>
+
+grouping_insert(schemaId, groupingId, temporalAtt, attSet, vxxRelpartId, vxeRelpartId, vbxRelpartId, vbeRelpartId) ::=
+<<
+CREATE OR REPLACE PROCEDURE <schemaId:delimiteur()>.insert_<groupingId>(<attSet:{a|_<a.id> <if(a.fct)><a.type><else><schemaId:delimiteur()>.<a.type:delimiteur()><endif>}; separator=", ">, _<temporalAtt.id> <schemaId:delimiteur()>.<temporalAtt.type:delimiteur()>)
+ AS
+  $$
+  DECLARE
+    err_msg TEXT;
+  BEGIN
+    RAISE NOTICE 'Insert into <groupingId>';
+    -- Vx
+    IF lower(_<temporalAtt.id>) IS NULL THEN
+      IF upper(_<temporalAtt.id>) IS NULL THEN
+        RAISE NOTICE 'INSERT vxx';
+          <if(vxxRelpartId)>
+            <insertion_temp(schemaId, vxxRelpartId, attSet, false , false, "")>
+          <endif>
+      ELSE
+            RAISE NOTICE 'INSERT vxe';
+            <insertion_temp(schemaId, vxeRelpartId, attSet, "until", temporalAtt, "upper")>
+      END IF;
+    -- Vb
+    ELSE
+        IF upper(_<temporalAtt.id>) IS NULL THEN
+            RAISE NOTICE 'INSERT vbx';
+            <insertion_temp(schemaId, vbxRelpartId, attSet, "since", temporalAtt, "lower")>
+        ELSE
+            RAISE NOTICE 'INSERT vbe';
+            <insertion_temp(schemaId, vbeRelpartId, attSet, "during", temporalAtt, "")>
+        END IF;
+    END IF;
+
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS err_msg = MESSAGE_TEXT;
+    RAISE EXCEPTION 'Insert into <groupingId>: %', err_msg;
+  END;
+  $$
+  LANGUAGE 'plpgsql';
+<\n>
+>>
+
+/**************************************************************
+ Divers gabarit réutilisable
+***************************************************************/
+attSet(set)::= <% (<set:{a|<a.id:delimiteur()> <a.type:delimiteur()>}; separator=", ">) %>
+
+insertion_temp(schemaId, RelpartId, attSet, temporalAtt, temporalValue, fct)::=
+<<INSERT INTO <schemaId:delimiteur()>.<RelpartId:delimiteur()>(<attSet:{a|<a.id:delimiteur()>}; separator=", "><if(temporalAtt)>, <temporalAtt:delimiteur()><endif>)
+  VALUES(<attSet:{a|_<a.id>}; separator=", "><if(temporalValue)>, <fct>(_<temporalValue.id>)<endif>);
+>>

@@ -1,0 +1,115 @@
+import "SSQL.stg"
+
+/*************************************************************
+Gabarit de génération de code SQL pour Postgres v14.1+
+Notes :
+  * Tous les identificateurs doivent avoir un delimiteur.
+**************************************************************/
+
+/*************************************************************
+Add PostgreSQL temporal extensions
+*************************************************************/
+create_gist_extension() ::=
+<<
+create extension if not exists "btree_gist";
+<\n>
+>>
+
+create_search_path(schemaSet)::=
+<<
+set search_path to <schemaSet:{e|<e.id:delimiteur()>}; separator=", ">;
+<\n>
+>>
+
+/******************************************************************************
+Fonctions EMIRA de chaque table d'une bd.
+*******************************************************************************/
+evaluate_function_attr(tableId, schemaId, nomatt, attSet) ::=
+<<
+-- fonction evaluer pour la table : <tableId>
+create function <schemaId:delimiteur()>.<tableId>_eva_<nomatt.id>
+  (
+  <attSet:{a|_<a.id> <if(a.isBuiltIn)><a.type><else><schemaId:delimiteur()>.<a.type:delimiteur()><endif>}; separator=", ">
+  )
+RETURNS TABLE (<attSet:{a|<a.id> <if(a.isBuiltIn)><a.type><else><schemaId:delimiteur()>.<a.type:delimiteur()><endif>}; separator=", ">)
+LANGUAGE SQL
+AS
+$$
+    select *
+    from <schemaId:delimiteur()>.<tableId>
+    where <attSet:{a|<a.id> = _<a.id>}; separator=" and ">
+$$;
+<\n>
+>>
+
+
+insert_procedure(tableId, schemaId, attSet) ::=
+<<
+-- fonction insert into table : <tableId>
+create or replace procedure <schemaId:delimiteur()>.<tableId>_ins
+  ( <attSet:{a|_<a.id> <if(a.isBuiltIn)><a.type><else><schemaId:delimiteur()>.<a.type:delimiteur()><endif>}; separator=", ">)
+language 'plpgsql'
+as $$
+BEGIN
+    insert into <schemaId:delimiteur()>.<tableId> (<attSet:{a|<a.id>}; separator=", ">)
+    values (<attSet:{a|_<a.id>}; separator=", ">);
+END;
+$$;
+<\n>
+>>
+
+update_procedure_attr(tableId, schemaId, nomatt, keyattSet) ::=
+<<
+-- procedure modifier pour la table : <tableId>
+create or replace procedure <schemaId:delimiteur()>.<tableId>_mod_<nomatt.id>
+  ( _<nomatt.id> <if(nomatt.isBuiltIn)><nomatt.type><else><schemaId:delimiteur()>.<nomatt.type:delimiteur()><endif>,
+    <keyattSet:{a|_<a.id> <if(a.isBuiltIn)><a.type><else><schemaId:delimiteur()>.<a.type:delimiteur()><endif> }; separator=", ">
+  )
+language 'plpgsql'
+as $$
+BEGIN
+      update <schemaId:delimiteur()>.<tableId>
+      set <nomatt.id> = _<nomatt.id>
+      where <keyattSet:{a|<a.id> = _<a.id> }; separator="and ">;
+END;
+$$;
+<\n>
+>>
+
+delete_procedure(tableId, schemaId, keyattSet) ::=
+<<
+-- procedure delete pour la table : <tableId>
+create or replace procedure <schemaId:delimiteur()>.<tableId>_del
+  ( <keyattSet:{a|_<a.id> <if(a.isBuiltIn)><a.type><else><schemaId:delimiteur()>.<a.type:delimiteur()><endif>}; separator=", ">
+  )
+language 'plpgsql'
+as $$
+BEGIN
+      delete from <schemaId:delimiteur()>.<tableId>
+      where <keyattSet:{a|<a.id> = _<a.id>}; separator=" and ">;
+END;
+$$;
+<\n>
+>>
+
+archiver_procedure(tableIdVbe, tableIdVbx, schemaId, keyattSet, vbeAtt, attSet) ::=
+<<
+-- procedure archiver pour : <tableId>
+create or replace procedure <schemaId:delimiteur()>.<tableId>_arc
+  ( <keyattSet:{a|_<a.id> <if(a.isBuiltIn)><a.type><else><schemaId:delimiteur()>.<a.type:delimiteur()><endif>}; separator=", ">,
+    _<vbeAtt.id>,
+  )
+language 'plpgsql'
+as $$
+BEGIN
+      delete from <schemaId:delimiteur()>.<tableIdVbx>
+      where <keyattSet:{a|<a.id> = _<a.id>}; separator=" and ">;
+      insert into <schemaId:delimiteur()>.<tableIdVbe> (<attSet:{a|<a.id>}; separator=", ">, <vbeAtt.id>)
+         values (<attSet:{a|_<a.id>}; separator=", ">, _<vbeAtt.id>);
+END;
+$$;
+<\n>
+>>
+notExists()::=<% if not exists %>
+domainTerm()::=<% domain %>
+beforeTypeTerm()::=<% as %>

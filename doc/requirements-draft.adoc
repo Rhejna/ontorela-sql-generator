@@ -1,0 +1,147 @@
+= Spécification des exigences de {produit}
+Christina Khnaisser <Christina.Khnaisser@usherbrooke.ca>
+Rémi Létourneau <Rémi.Letourneau@usherbrooke.ca>
+:projet: Voyage
+:produit: SqlGen
+:toc:
+:toc-title: Tables des matières
+:sectnums:
+
+== Introduction
+=== Objet et porté du document
+Le présent document permet de décrire le produit {produit} développé dans le cadre du projet {projet}. Ses principaux objectifs sont de :
+
+* présenter le contexte dans lequel s’inscrivent le but du projet, les objectifs du développement du produit et les besoins qu’il doit satisfaire;
+* présenter et motiver la modélisation nécessaire et suffisante du domaine d’application;
+* définir le problème sur la base du modèle du domaine d’application; 
+* définir les solutions envisagées; 
+* définir les exigences applicables à la solution retenue; 
+* démontrer la rencontre des besoins à l’origine du produit.
+
+Le présent document, une fois complété et approuvé, est la seule référence fonctionnelle applicable sur laquelle l’architecture et 
+la conception du produit pourront être établies. Il s’adresse au maitre d’ouvrage, au maitre d’oeuvre, au groupe de l’assurance de la qualité, 
+aux responsables des essais et l’ensemble des membres de l’équipe de développement.
+
+=== Évolution du document
+La rédaction du document a commencé en juin 2023. Les principales versions et leur contenu sont décrits ci-après :
+
+* version 1 (aaaa-mm-jj) : xxx
+* version 2 (aaaa-mm-jj) : xxx
+
+== Présentation du problème
+=== Mise en contexte
+Présentation générale de l’environnement dans lequel s’insère le {produit} :
+
+* Description sommaire du métier (domaine d’application, domaine d’affaires...).
+
+Dans un système de santé avec plusieurs application qui utilisent des modules de génération de code sql par template qui ont été copier-coller dans deux projets séparer. Mais ceci n'est pas pratique si une erreur est découvert dans cet partie de code, on doit alors corriger dans les deux projet. Donc ce projet ci, veut prendre le module des deux projets pour en faire une librairie externe qui sera appelée par les deux projets.
+
+
+* Présentation de la problématique à l’origine du {projet}.
+
+Duplication de code à travers plusieurs projets
+
+* Présentation des objectifs du {projet}.
+
+Création d'une librairie contenant les modules commun à plusieurs projets.
+
+* Présentation de l’organisation ayant requis le développement du {produit}.
+Le GRIIS
+* Inventaire des entités organisationnelles touchées.
+* Inventaire des autres parties prenantes touchées.
+* Présentations des attentes de chacune des parties prenantes.
+* Présentation de chacun des acteurs et de leurs attentes (lors de l’exploration, la technique des « cartes d’acteur » permet de rassembler ces informations).
+
+
+=== Définition du problème
+==== Besoins
+Besoins exprimés par le client, mais éventuellement reformulés pour tirer parti de la présentation du domaine d’application exposé précédemment.
+
+BE.01 - Éliminier la duplication de code
+
+BE.02 - ...
+
+BE.03 - ...
+
+==== Contraintes
+Contraintes exprimées par le client, mais éventuellement reformulées pour tirer parti de la présentation
+du domaine d’application exposé précédemment.
+
+CO.01 - Permettre au autres projet de fonctionner sans modification de code
+
+CO.02 -
+
+==== Hypothèses
+
+HY.01 - definition
+
+HY.02 - definition
+
+==== Prolongements
+Prolongements envisagés dont le produit n’est pas encore redevable, mais pour lesquels une évolution de la solution doit être possible.
+
+PR.01 - definition
+
+PR.02 - definition
+
+=== Modélisation du problème
+Présentation du problème à résoudre dans son contexte.
+
+Le plus souvent, le modèle du problème est suffisamment complexe pour justifier de faire des sous-sections séparées pour présenter adéquatement l’environnement les acteurs, les sous-problèmes et les liens entre eux. Un diagramme de contexte constitue le plus souvent une bonne illustration initiale du problème ; on recommande de le compléter par un diagramme de structure. Les « frames » de Jackson peuvent ensuite être mis à contribution pour préciser le problème et le décomposer en sous-problème.
+
+L’ordre de présentations des sous-sections peut varier selon la méthode d’analyse, bien que dans presque tous les cas on commence par présenter l’environnement et les agents. Si une approche « structurée » est utilisée, on présentera ensuite les processus puis la nature des informations (tant celles composant les flux de données que celles stockées dans les dépôts de données). Si une approche orientée objet (contexte) est utilisée, on présentera d’abord les classes puis les interactions. Si une approche orientée objet (interaction) est utilisée, on présentera d’abord les utilisateurs, ensuite les cas d’utilisation, puis les classes et les interactions.
+
+== Présentation de la solution
+=== Caractérisation de la solution
+...
+
+La génération d'un schéma historicisé ou non s'effectue graçe à des gabarit de structure et de contrainte (_templates_).
+
+==== Présentation des processus
+DFD de la solution
+
+Description du DFD
+
+
+=== Solutions existantes
+Inventaire des solutions existantes qui répondent complètement ou partiellement aux besoins.
+
+Il n'existe pas de solutions existantes à ce jour.
+
+=== Limites
+Inventaires des attentes, des besoins, des hypothèses et des contraintes que la présente proposition de solution ne permet pas de satisfaire.
+
+LI.01 - definition
+
+LI.02 - definition
+
+== Présentation des exigences
+
+=== Logiciel
+La description détaillée des exigences doit notamment permettre d’établir le niveau de validation recherché aux fins d’acceptation. Elle comprend donc l’ensemble des exigences applicables formulées de façon claire, complète et arbitrable. Avant de dresser l’inventaire exhaustif des exigences fonctionnelles et non fonctionnelles, un inventaire des scénarios de déploiement et d’exploitation envisagés est souvent présenté ainsi que la notation à l’aide de laquelle les exigences sont décrites.
+
+EX.01 definition
+
+EX.02 definition
+
+=== Interface machine-machine
+Exigences relatives à chacune des interfaces machine-machine dont le produit est redevable.
+
+IMM.01 definition 
+
+IMM.02 definition 
+
+=== Interface personne-machine
+Exigences relatives à chacune des interfaces personne-machine dont le produit est redevable.
+
+IMM.01 definition
+
+IMM.02 definition 
+
+== Références
+
+== Glossaire
+
+== Annexe - Les gabarits
+Mettre les gabarits ? +
+À réfléchir
